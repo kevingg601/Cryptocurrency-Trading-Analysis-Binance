@@ -1,0 +1,41 @@
+# Dependencies
+node_modules/
+
+# Build and packaged application output
+dist/
+dist-ssr/
+dist-desktop/
+AntigravityCrypto-Desktop/
+
+# Local environments and settings
+.venv/
+.env
+.env.*
+!.env.example
+*.local
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Generated archives and installers
+*.zip
+*.exe
+*.msi
+
+# Editor and operating-system files
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
