@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Compass, TrendingUp, TrendingDown, Zap, Layers, Eye, ShieldCheck } from 'lucide-react';
+import { Compass, TrendingUp, TrendingDown, Zap } from 'lucide-react';
 import { deriveSuggestedTradeLevels } from '../services/tradeLevels';
 import { formatCryptoPrice } from '../services/utils';
 
@@ -181,24 +181,6 @@ export default function SignalAdvisor({
 
   const coinSymbol = symbol.replace('USDT', '');
 
-  // Calculate mock/dynamic Open Interest velocities based on symbol properties
-  // E.g. deterministic based on symbol name to prevent visual jumps but remain dynamic
-  const getOiVelocity = (scale: '5m' | '1h' | '6h') => {
-    const code = symbol.charCodeAt(0) + symbol.charCodeAt(1);
-    let base = (code % 20) / 10 - 1; // -1 to 1
-    if (rsiScore > 0) base += 0.5;
-    if (rsiScore < 0) base -= 0.5;
-
-    if (scale === '5m') return base * 0.45;
-    if (scale === '1h') return base * 1.8;
-    return base * 5.4;
-  };
-
-  // Four Gates Verification states
-  const gate1 = true; // Trading Universe: Always true for listed assets
-  const gate2 = rsiScore !== 0 || macdScore !== 0; // Early Footprints: indicators active
-  const gate3 = bbPosition > 0.05 && bbPosition < 0.95; // Current location: not completely pinned
-  const gate4 = Math.abs(totalScore) >= 0.5; // Trading confirmation: active signal exists
 
   return (
     <div className="card" style={{ marginTop: '24px' }}>
@@ -379,91 +361,11 @@ export default function SignalAdvisor({
             </div>
           </div>
 
-          {/* OI Velocity and Derivatives Metrics Panel */}
-          <div style={{
-            background: 'rgba(255, 255, 255, 0.02)',
-            border: '1px solid var(--border-glass)',
-            borderRadius: 'var(--radius-md)',
-            padding: '16px 20px',
-            display: 'grid',
-            gridTemplateColumns: '1fr 1fr 1fr',
-            gap: '12px',
-            textAlign: 'center'
-          }}>
-            <div>
-              <div style={{ fontSize: '11px', color: 'var(--text-secondary)', marginBottom: '6px' }}>OI 5m 增速</div>
-              <div style={{ fontSize: '16px', fontWeight: 700, fontFamily: 'var(--font-display)' }} className={getOiVelocity('5m') >= 0 ? 'trend-up' : 'trend-down'}>
-                {getOiVelocity('5m') >= 0 ? '+' : ''}{getOiVelocity('5m').toFixed(2)}%
-              </div>
-            </div>
-            <div style={{ borderLeft: '1px solid var(--border-glass)' }}>
-              <div style={{ fontSize: '11px', color: 'var(--text-secondary)', marginBottom: '6px' }}>OI 1h 增速</div>
-              <div style={{ fontSize: '16px', fontWeight: 700, fontFamily: 'var(--font-display)' }} className={getOiVelocity('1h') >= 0 ? 'trend-up' : 'trend-down'}>
-                {getOiVelocity('1h') >= 0 ? '+' : ''}{getOiVelocity('1h').toFixed(2)}%
-              </div>
-            </div>
-            <div style={{ borderLeft: '1px solid var(--border-glass)' }}>
-              <div style={{ fontSize: '11px', color: 'var(--text-secondary)', marginBottom: '6px' }}>OI 6h 增速</div>
-              <div style={{ fontSize: '16px', fontWeight: 700, fontFamily: 'var(--font-display)' }} className={getOiVelocity('6h') >= 0 ? 'trend-up' : 'trend-down'}>
-                {getOiVelocity('6h') >= 0 ? '+' : ''}{getOiVelocity('6h').toFixed(2)}%
-              </div>
-            </div>
-          </div>
         </div>
 
         {/* Right Card: Four Gates and Target Levels */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
           
-          {/* Four Gates Verification UI */}
-          <div style={{
-            background: 'rgba(255, 255, 255, 0.02)',
-            border: '1px solid var(--border-glass)',
-            borderRadius: 'var(--radius-md)',
-            padding: '16px 20px',
-          }}>
-            <div style={{ fontSize: '13px', fontWeight: 700, color: 'var(--text-primary)', marginBottom: '14px', display: 'flex', alignItems: 'center', gap: '6px' }}>
-              <Layers size={14} color="var(--accent-secondary)" />
-              <span>收割機「四道門」驗證系統</span>
-            </div>
-            
-            <div className="four-gates-grid" style={{
-              display: 'grid',
-              gridTemplateColumns: '1fr 1fr',
-              gap: '12px'
-            }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '10px 12px', background: 'rgba(255,255,255,0.01)', borderRadius: '6px', border: '1px solid rgba(255,255,255,0.02)' }}>
-                <ShieldCheck size={16} color={gate1 ? 'var(--trend-up)' : 'var(--text-muted)'} />
-                <div>
-                  <div style={{ fontSize: '12px', fontWeight: 600 }}>1. 交易宇宙</div>
-                  <div style={{ fontSize: '9px', color: 'var(--text-muted)' }}>合約上市核准</div>
-                </div>
-              </div>
-
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '10px 12px', background: 'rgba(255,255,255,0.01)', borderRadius: '6px', border: '1px solid rgba(255,255,255,0.02)' }}>
-                <Eye size={16} color={gate2 ? 'var(--trend-up)' : '#ffb300'} />
-                <div>
-                  <div style={{ fontSize: '12px', fontWeight: 600 }}>2. 早期痕迹</div>
-                  <div style={{ fontSize: '9px', color: 'var(--text-muted)' }}>量能指標活絡</div>
-                </div>
-              </div>
-
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '10px 12px', background: 'rgba(255,255,255,0.01)', borderRadius: '6px', border: '1px solid rgba(255,255,255,0.02)' }}>
-                <Compass size={16} color={gate3 ? 'var(--trend-up)' : '#ffb300'} />
-                <div>
-                  <div style={{ fontSize: '12px', fontWeight: 600 }}>3. 當前位置</div>
-                  <div style={{ fontSize: '9px', color: 'var(--text-muted)' }}>波動未超買過載</div>
-                </div>
-              </div>
-
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '10px 12px', background: 'rgba(255,255,255,0.01)', borderRadius: '6px', border: '1px solid rgba(255,255,255,0.02)' }}>
-                <Zap size={16} color={gate4 ? 'var(--trend-up)' : '#ffb300'} />
-                <div>
-                  <div style={{ fontSize: '12px', fontWeight: 600 }}>4. 交易確認</div>
-                  <div style={{ fontSize: '9px', color: 'var(--text-muted)' }}>多空動能交叉</div>
-                </div>
-              </div>
-            </div>
-          </div>
 
           {/* Target Levels Grid */}
           <div style={{

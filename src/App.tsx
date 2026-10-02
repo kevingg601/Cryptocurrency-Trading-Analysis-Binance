@@ -1,19 +1,21 @@
-import { useState, useEffect, useRef, useMemo } from 'react';
+import { lazy, Suspense, useState, useEffect, useRef, useMemo } from 'react';
 import { fetchSupportedCoins, fetchTickers, connectTickerWebSocket, connectAggregateTradeWebSocket, fetchFundingRates, FALLBACK_COINS } from './services/binance';
 import type { TickerData, CoinMetadata, MarketType } from './services/binance';
 import { formatCryptoPrice } from './services/utils';
 import CryptoTable from './components/CryptoTable';
 import ChartContainer from './components/ChartContainer';
-import Portfolio from './components/Portfolio';
 import MomentumRadar from './components/MomentumRadar';
-import Cockpit from './components/Cockpit';
 import type { PaperTrade, PaperTradeHistory } from './components/Cockpit';
 import TradingModal from './components/TradingModal';
 import MarketAlertCenter from './components/MarketAlertCenter';
-import AutoBotLab from './components/AutoBotLab';
+import CoinPicker from './components/CoinPicker';
 import { useMarketAlerts } from './hooks/useMarketAlerts';
 import { LayoutDashboard, Wallet, Clock, Activity, Sun, Moon } from 'lucide-react';
 import './App.css';
+
+const Portfolio = lazy(() => import('./components/Portfolio'));
+const Cockpit = lazy(() => import('./components/Cockpit'));
+const AutoBotLab = lazy(() => import('./components/AutoBotLab'));
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<'dashboard' | 'portfolio'>(() => {
@@ -91,8 +93,7 @@ export default function App() {
   } = useMarketAlerts(marketType);
 
   // Merge and deduplicate subscription symbols
-  const subSymbols = Array.from(new Set([...subscribedSymbols, selectedSymbol, ...watchlist]));
-  const subSymbolsKey = subSymbols.sort().join(',');
+  const subSymbolsKey = Array.from(new Set([selectedSymbol, ...watchlist, ...subscribedSymbols])).join(',');
 
   // Apply theme class to document body
   useEffect(() => {
@@ -131,6 +132,7 @@ export default function App() {
     setCoins([]);
     setTickers({});
     setFundingRates({});
+    setSubscribedSymbols([]);
 
     // 1. Fetch dynamic coins list from exchange info
     fetchSupportedCoins(marketType)
@@ -139,9 +141,7 @@ export default function App() {
         setCoins(loadedCoins);
 
         // Ensure selectedSymbol exists in the newly loaded market
-        if (loadedCoins.length > 0 && !loadedCoins.some(c => c.symbol === selectedSymbol)) {
-          setSelectedSymbol(loadedCoins[0].symbol);
-        }
+        setSelectedSymbol(current => loadedCoins.length > 0 && !loadedCoins.some(c => c.symbol === current) ? loadedCoins[0].symbol : current);
 
         // 2. Fetch initial 24h ticker snapshot for all symbols
         return fetchTickers(marketType);
@@ -174,14 +174,20 @@ export default function App() {
       })
       .catch((err) => {
         console.error(`Failed to load initial Binance ${marketType} data:`, err);
-        if (active && coins.length === 0) {
+        if (active) {
           setCoins(FALLBACK_COINS);
           setSubscribedSymbols(FALLBACK_COINS.map(c => c.symbol));
         }
       });
 
+    return () => { active = false; };
+  }, [marketType]);
+
+  useEffect(() => {
+    let active = true;
+
     // 4. Establish WebSocket connection (streams all symbols via !ticker@arr or combined streams)
-    const currentSubSymbols = Array.from(new Set([...subscribedSymbols, selectedSymbol, ...watchlist]));
+    const currentSubSymbols = subSymbolsKey.split(',').filter(Boolean);
     const ws = connectTickerWebSocket(
       marketType,
       (batch) => {
@@ -244,9 +250,7 @@ export default function App() {
 
     return () => {
       active = false;
-      if (wsRef.current) {
-        wsRef.current.close();
-      }
+      ws.close();
       aggregateTradeWs.close();
       if (ratesInterval) {
         clearInterval(ratesInterval);
@@ -254,10 +258,9 @@ export default function App() {
     };
   }, [marketType, subSymbolsKey, processTickerBatch, processAggregateTrade]);
 
-  // Fallback Polling & Price Simulation when WebSocket is not connected
+  // Keep exchange snapshots intact while the live stream is unavailable.
   useEffect(() => {
     let pollingInterval: any = null;
-    let simulationInterval: any = null;
 
     // 1. Fallback REST Polling: If disconnected, poll actual prices from REST API every 10s
     if (wsStatus === 'disconnected') {
@@ -281,43 +284,8 @@ export default function App() {
       }, 10000);
     }
 
-    // 2. Fallback Price Simulation: If NOT connected (either disconnected or connecting),
-    // simulate minor price fluctuations every 1.5s so the UI feels alive.
-    if (wsStatus !== 'connected') {
-      console.log('WebSocket not connected: Starting local price fluctuation engine...');
-      simulationInterval = setInterval(() => {
-        setTickers((prev) => {
-          const next = { ...prev };
-          const symbols = Object.keys(next);
-          if (symbols.length === 0) return prev;
-
-          symbols.forEach((sym) => {
-            const currentTicker = next[sym];
-            if (!currentTicker) return;
-
-            // Random walk price change: between -0.04% and +0.04%
-            const pct = (Math.random() * 0.08 - 0.04) / 100;
-            const newPrice = currentTicker.price * (1 + pct);
-            const priceDiff = newPrice - (currentTicker.open || currentTicker.price);
-            const openVal = currentTicker.open || currentTicker.price;
-            const newPriceChangePercent = openVal !== 0 ? (priceDiff / openVal) * 100 : currentTicker.priceChangePercent;
-
-            next[sym] = {
-              ...currentTicker,
-              price: newPrice,
-              priceChangePercent: newPriceChangePercent,
-              high: Math.max(currentTicker.high || newPrice, newPrice),
-              low: Math.min(currentTicker.low || newPrice, newPrice),
-            };
-          });
-          return next;
-        });
-      }, 1500);
-    }
-
     return () => {
       if (pollingInterval) clearInterval(pollingInterval);
-      if (simulationInterval) clearInterval(simulationInterval);
     };
   }, [wsStatus, marketType]);
 
@@ -542,12 +510,16 @@ export default function App() {
     stopLoss?: number
   ) => {
     const margin = size / leverage;
+    if (marketType === 'spot' && (side !== 'LONG' || leverage !== 1)) {
+      alert('現貨模擬僅支援買入與 1 倍資金。');
+      return;
+    }
     if (paperBalance < margin) {
       alert('可用餘額不足以支付此部位保證金！');
       return;
     }
 
-    const liq = side === 'LONG'
+    const liq = marketType === 'spot' ? undefined : side === 'LONG'
       ? price * (1 - 1 / leverage + 0.004)
       : price * (1 + 1 / leverage - 0.004);
 
@@ -701,10 +673,10 @@ export default function App() {
     setTradingModal({
       isOpen: true,
       symbol,
-      suggestedSide: side || 'LONG',
+      suggestedSide: marketType === 'spot' ? 'LONG' : side || 'LONG',
       suggestedPrice: price || tickers[symbol]?.price || 0,
-      suggestedTp,
-      suggestedSl,
+      suggestedTp: marketType === 'spot' && side === 'SHORT' ? undefined : suggestedTp,
+      suggestedSl: marketType === 'spot' && side === 'SHORT' ? undefined : suggestedSl,
       conservativeEntry,
       aggressiveEntry
     });
@@ -771,21 +743,25 @@ export default function App() {
           </div>
           
           <nav className="nav-links">
-            <div
+            <button
+              type="button"
+              aria-current={activeTab === 'dashboard' ? 'page' : undefined}
               className={`nav-item ${activeTab === 'dashboard' ? 'active' : ''}`}
               onClick={() => setActiveTab('dashboard')}
             >
               <LayoutDashboard size={18} />
               <span>即時行情儀表板</span>
-            </div>
+            </button>
             
-            <div
+            <button
+              type="button"
+              aria-current={activeTab === 'portfolio' ? 'page' : undefined}
               className={`nav-item ${activeTab === 'portfolio' ? 'active' : ''}`}
               onClick={() => setActiveTab('portfolio')}
             >
               <Wallet size={18} />
               <span>虛擬資產帳戶</span>
-            </div>
+            </button>
           </nav>
         </div>
 
@@ -833,13 +809,13 @@ export default function App() {
                   ? '已連線至交易所即時報價'
                   : wsStatus === 'connecting'
                   ? `正在嘗試連線中... (第 ${wsAttempts} 次嘗試)`
-                  : '交易所 WebSocket 連線受阻，已自動啟動 REST 輪詢與本地報價模擬備援'
+                  : '即時連線中斷，每 10 秒向交易所取得報價；顯示最近一次真實報價'
               }>
                 <span className="ws-status-dot"></span>
                 <span className="ws-status-text">
                   {wsStatus === 'connected' && '已連線'}
                   {wsStatus === 'connecting' && `連線中 (${wsAttempts})`}
-                  {wsStatus === 'disconnected' && '備援中'}
+                  {wsStatus === 'disconnected' && '報價輪詢中'}
                 </span>
                 {wsStatus !== 'connected' && (
                   <button
@@ -878,13 +854,13 @@ export default function App() {
                   className={viewMode === 'cockpit' ? 'active' : ''}
                   onClick={() => setViewMode('cockpit')}
                 >
-                  駕駛艙
+                  模擬交易
                 </button>
                 <button
                   className={viewMode === 'bot' ? 'active' : ''}
                   onClick={() => setViewMode('bot')}
                 >
-                  機器人
+                  策略回測
                 </button>
               </div>
             )}
@@ -986,7 +962,7 @@ export default function App() {
               )}
               <div>
                 <span className="focus-label">目前監控</span>
-                <h2>{coinSymbol}/USDT</h2>
+                <CoinPicker coins={coins} tickers={tickers} symbol={selectedSymbol} watchlist={watchlist} onSelect={setSelectedSymbol} />
                 <small>{selectedCard.name}</small>
               </div>
             </div>
@@ -1016,6 +992,7 @@ export default function App() {
           </section>
         )}
 
+        <Suspense fallback={<div className="empty-state" role="status">載入工作區...</div>}>
         {/* Dashboard View */}
         {activeTab === 'dashboard' && (
           viewMode === 'analysis' ? (
@@ -1029,7 +1006,7 @@ export default function App() {
                 marketType={marketType}
                 alerts={selectedMarketAlerts}
                 onOpenPaperTrade={handleTriggerOpenTradeModal}
-                onQuickFollowTrade={handleQuickFollowTrade}
+                onQuickFollowTrade={marketType === 'futures' ? handleQuickFollowTrade : undefined}
                 theme={theme}
               />
 
@@ -1075,7 +1052,7 @@ export default function App() {
                             fontSize: '15px'
                           }}
                         >
-                          AI 動能雷達
+                          動能排行
                         </span>
                       </div>
                     </h2>
@@ -1193,6 +1170,7 @@ export default function App() {
               symbol={selectedSymbol}
               marketType={marketType}
               currentPrice={selectedTicker ? selectedTicker.price : null}
+              theme={theme}
             />
           ) : (
             <Cockpit
@@ -1219,10 +1197,12 @@ export default function App() {
         {activeTab === 'portfolio' && (
           <Portfolio tickers={tickers} coins={coins} marketType={marketType} />
         )}
+        </Suspense>
       </main>
 
       {/* Trading Modal Overlay */}
       <TradingModal
+        marketType={marketType}
         isOpen={tradingModal.isOpen}
         symbol={tradingModal.symbol}
         suggestedSide={tradingModal.suggestedSide}

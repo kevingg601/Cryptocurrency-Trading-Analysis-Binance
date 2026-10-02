@@ -1,9 +1,11 @@
 import { useState, useEffect } from 'react';
 import { X, Info } from 'lucide-react';
 import { formatCryptoPrice, getPricePrecision } from '../services/utils';
+import type { MarketType } from '../services/binance';
 
 interface TradingModalProps {
   isOpen: boolean;
+  marketType: MarketType;
   symbol: string;
   suggestedSide: 'LONG' | 'SHORT';
   suggestedPrice: number;
@@ -27,6 +29,7 @@ interface TradingModalProps {
 
 export default function TradingModal({
   isOpen,
+  marketType,
   symbol,
   suggestedSide,
   suggestedPrice,
@@ -41,7 +44,8 @@ export default function TradingModal({
   const [orderType, setOrderType] = useState<'MARKET' | 'LIMIT'>('MARKET');
   const [side, setSide] = useState<'LONG' | 'SHORT'>('LONG');
   const [price, setPrice] = useState<number>(suggestedPrice);
-  const [leverage, setLeverage] = useState<number>(20);
+  const [chosenLeverage, setLeverage] = useState<number>(20);
+  const leverage = marketType === 'spot' ? 1 : chosenLeverage;
   const [size, setSize] = useState<string>('1000'); // position size in USDT
   
   const [useTpSl, setUseTpSl] = useState<boolean>(false);
@@ -50,7 +54,7 @@ export default function TradingModal({
 
   // Update side and price when suggested suggestions change (e.g. user clicks another coin)
   useEffect(() => {
-    setSide(suggestedSide);
+    setSide(marketType === 'spot' ? 'LONG' : suggestedSide);
     setPrice(suggestedPrice);
     // Suggest default TP/SL based on direction
     if (suggestedPrice > 0) {
@@ -72,7 +76,7 @@ export default function TradingModal({
         setStopLoss(sl);
       }
     }
-  }, [suggestedSide, suggestedPrice, symbol, suggestedTp, suggestedSl]);
+  }, [suggestedSide, suggestedPrice, symbol, suggestedTp, suggestedSl, marketType]);
 
   if (!isOpen) return null;
 
@@ -83,7 +87,7 @@ export default function TradingModal({
 
   // Calculate liquidation price
   const calculateLiqPrice = () => {
-    if (currentPrice <= 0 || leverage <= 0) return 0;
+    if (marketType === 'spot' || currentPrice <= 0 || leverage <= 0) return 0;
     // Standard contract liquidation formula:
     // LONG: Liq = Entry * (1 - 1/L + maintenance_margin_rate (e.g. 0.4%))
     // SHORT: Liq = Entry * (1 + 1/L - maintenance_margin_rate (e.g. 0.4%))
@@ -176,7 +180,7 @@ export default function TradingModal({
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
             <div className={`side-indicator-dot ${side}`} />
             <h3 className="modal-title">
-              模擬合約委託下單 - <strong>{coinName} / USDT</strong>
+              模擬{marketType === 'spot' ? '現貨' : '合約'}委託 - <strong>{coinName} / USDT</strong>
             </h3>
           </div>
           <button className="modal-close-btn" onClick={onClose}>
@@ -222,6 +226,7 @@ export default function TradingModal({
             <button
               type="button"
               className={`side-toggle-btn short ${side === 'SHORT' ? 'active' : ''}`}
+              disabled={marketType === 'spot'}
               onClick={() => {
                 setSide('SHORT');
                 if (price > 0) {
@@ -314,6 +319,7 @@ export default function TradingModal({
               min="1"
               max="125"
               className="leverage-slider"
+              disabled={marketType === 'spot'}
               value={leverage}
               onChange={(e) => setLeverage(parseInt(e.target.value))}
             />
@@ -323,6 +329,7 @@ export default function TradingModal({
                   key={lev}
                   type="button"
                   className={`preset-btn ${leverage === lev ? 'active' : ''}`}
+                  disabled={marketType === 'spot'}
                   onClick={() => handlePresetLeverage(lev)}
                 >
                   {lev}x
@@ -446,16 +453,16 @@ export default function TradingModal({
                 ${estMargin.toFixed(2)} USDT
               </strong>
             </div>
-            <div className="detail-row">
+            {marketType === 'futures' && <div className="detail-row">
               <span>預估強平價格 (Est. Liq)</span>
               <strong style={{ color: 'var(--trend-down)', fontFamily: 'var(--font-display)' }}>
                 ${liqPrice > 0 ? formatCryptoPrice(liqPrice) : '--'} USDT
               </strong>
-            </div>
-            <div style={{ display: 'flex', gap: '4px', alignItems: 'center', fontSize: '10px', color: 'var(--text-muted)', marginTop: '6px' }}>
+            </div>}
+            {marketType === 'futures' && <div style={{ display: 'flex', gap: '4px', alignItems: 'center', fontSize: '10px', color: 'var(--text-muted)', marginTop: '6px' }}>
               <Info size={10} />
               <span>注意：當行情觸及強平價時，部位保證金將會全數清算歸零。</span>
-            </div>
+            </div>}
           </div>
 
           {/* Submit Button */}

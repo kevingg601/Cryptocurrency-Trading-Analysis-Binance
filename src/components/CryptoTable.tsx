@@ -26,6 +26,8 @@ export default function CryptoTable({
 }: CryptoTableProps) {
   const [search, setSearch] = useState('');
   const [pageSize, setPageSize] = useState(50);
+  const [sort, setSort] = useState<'volume' | 'gainers' | 'losers'>('volume');
+  const [onlyWatchlist, setOnlyWatchlist] = useState(false);
   const [flashStates, setFlashStates] = useState<Record<string, 'up' | 'down' | null>>({});
   const prevPrices = useRef<Record<string, number>>({});
 
@@ -70,17 +72,18 @@ export default function CryptoTable({
 
   // 1. Sort all coins by 24h volume (quoteVolume) descending
   const sortedCoins = [...coins].sort((a, b) => {
+    if (sort !== 'volume') return ((tickers[b.symbol]?.priceChangePercent ?? 0) - (tickers[a.symbol]?.priceChangePercent ?? 0)) * (sort === 'gainers' ? 1 : -1);
     const volA = tickers[a.symbol]?.quoteVolume || 0;
     const volB = tickers[b.symbol]?.quoteVolume || 0;
     return volB - volA;
   });
 
   // 2. Filter by search query
-  const filteredCoins = sortedCoins.filter(coin => 
+  const filteredCoins = sortedCoins.filter(coin => (!onlyWatchlist || watchlist.includes(coin.symbol)) && (
     coin.name.toLowerCase().includes(search.toLowerCase()) ||
     coin.symbol.toLowerCase().includes(search.toLowerCase()) ||
     coin.baseAsset.toLowerCase().includes(search.toLowerCase())
-  );
+  ));
 
   // 3. Slice for pagination
   const displayedCoins = filteredCoins.slice(0, pageSize);
@@ -99,7 +102,7 @@ export default function CryptoTable({
       <div className="card-title">
         <span>加密貨幣即時行情</span>
         <div style={{ fontSize: '12px', color: 'var(--text-secondary)', fontWeight: 'normal' }}>
-          資料來源: Binance WebSocket (全市場批次同步)
+          {filteredCoins.length} 個交易對 · Binance
         </div>
       </div>
 
@@ -112,6 +115,11 @@ export default function CryptoTable({
           value={search}
           onChange={(e) => setSearch(e.target.value)}
         />
+      </div>
+
+      <div className="market-table-controls">
+        <label><span>排序</span><select aria-label="行情排序" value={sort} onChange={event => { setSort(event.target.value as typeof sort); setPageSize(50); }}><option value="volume">成交額</option><option value="gainers">漲幅優先</option><option value="losers">跌幅優先</option></select></label>
+        <label className="watchlist-filter"><input type="checkbox" checked={onlyWatchlist} onChange={event => { setOnlyWatchlist(event.target.checked); setPageSize(50); }} /><Star size={14} />只看關注</label>
       </div>
 
       <div className="crypto-table-container">

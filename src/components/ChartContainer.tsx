@@ -224,6 +224,8 @@ export default function ChartContainer({ symbol, coinName, logo, currentPrice, m
   const [timeframe, setTimeframe] = useState<string>('1h');
   const [klines, setKlines] = useState<KlineData[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
+  const [error, setError] = useState<string | null>(null);
+  const [retry, setRetry] = useState(0);
   const [oiQty, setOiQty] = useState<number | null>(null);
   
   const [indicators, setIndicators] = useState<{
@@ -238,6 +240,9 @@ export default function ChartContainer({ symbol, coinName, logo, currentPrice, m
   useEffect(() => {
     let active = true;
     setLoading(true);
+    setError(null);
+    setKlines([]);
+    setIndicators({ rsi: null, sma20: null, ema50: null, bb: null, macd: null });
     
     fetchKlines(symbol, timeframe, 200, marketType)
       .then((data) => {
@@ -247,13 +252,13 @@ export default function ChartContainer({ symbol, coinName, logo, currentPrice, m
       })
       .catch((err) => {
         console.error('Failed to load chart data:', err);
-        if (active) setLoading(false);
+        if (active) { setLoading(false); setError('無法取得 K 線，請重新載入。'); }
       });
 
     return () => {
       active = false;
     };
-  }, [symbol, timeframe, marketType]);
+  }, [symbol, timeframe, marketType, retry]);
 
   // Load Open Interest Quantity (Futures only)
   useEffect(() => {
@@ -280,8 +285,8 @@ export default function ChartContainer({ symbol, coinName, logo, currentPrice, m
     // Create chart instance
     const chart = createChart(chartContainerRef.current, {
       layout: {
-        background: { type: 'solid' as any, color: theme === 'light' ? '#ffffff' : '#0d1527' },
-        textColor: theme === 'light' ? '#5f6e80' : '#8a99ad',
+        background: { type: 'solid' as any, color: theme === 'light' ? '#ffffff' : '#191c1c' },
+        textColor: theme === 'light' ? '#5f6e80' : '#adb5b5',
       },
       grid: {
         vertLines: { color: theme === 'light' ? 'rgba(0, 0, 0, 0.04)' : 'rgba(255, 255, 255, 0.05)' },
@@ -494,14 +499,14 @@ export default function ChartContainer({ symbol, coinName, logo, currentPrice, m
 
   // Dynamically compute current Open Interest USD value
   const openInterestUSD = (oiQty !== null && currentPrice !== null) ? oiQty * currentPrice : null;
-  const tradeLevels = currentPrice !== null ? deriveSuggestedTradeLevels(currentPrice, indicators) : null;
+  const tradeLevels = !loading && !error && klines.length > 0 && currentPrice !== null ? deriveSuggestedTradeLevels(currentPrice, indicators) : null;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column' }}>
       <div className="card chart-card">
         <div className="chart-header">
           <div className="chart-title-section">
-            <img src={logo} alt={coinName} className="coin-logo" />
+            {logo ? <img src={logo} alt={coinName} className="coin-logo" /> : <div className="focus-logo-fallback">{symbol.slice(0, 2)}</div>}
             <h2 className="logo-text">{coinName}<span>即時線圖</span></h2>
             <div className="chart-coin-badge">
               <span className="coin-symbol">{symbol}</span>
@@ -522,18 +527,18 @@ export default function ChartContainer({ symbol, coinName, logo, currentPrice, m
         </div>
 
         <div className="chart-container" style={{ position: 'relative' }}>
-          {loading && (
+          {(loading || error) && (
             <div style={{
               position: 'absolute',
               top: 0, left: 0, right: 0, bottom: 0,
-              background: 'rgba(13, 21, 39, 0.8)',
+              background: 'var(--bg-secondary)',
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
               zIndex: 10,
               borderRadius: 'var(--radius-md)'
             }}>
-              載入中...
+              {error ? <div role="alert" className="chart-error"><span>{error}</span><button className="utility-icon-button" onClick={() => setRetry(value => value + 1)}>重新載入</button></div> : '載入中...'}
             </div>
           )}
           <div ref={chartContainerRef} style={{ width: '100%', height: '400px' }} />
@@ -542,7 +547,7 @@ export default function ChartContainer({ symbol, coinName, logo, currentPrice, m
         {tradeLevels && (
           <div className="entry-level-strip">
             <div className={`entry-level-side ${tradeLevels.side.toLowerCase()}`}>
-              {tradeLevels.side === 'LONG' ? '做多窗口' : '做空窗口'}
+              {tradeLevels.side === 'LONG' ? '多方觀察點' : '空方觀察點'}
             </div>
             <div>
               <span>保守</span>
@@ -592,14 +597,14 @@ export default function ChartContainer({ symbol, coinName, logo, currentPrice, m
       </div>
 
       {/* Render the AI Trade Advisor Panel */}
-      <SignalAdvisor
+      {!loading && !error && klines.length > 0 && <SignalAdvisor
         symbol={symbol}
         currentPrice={currentPrice}
         indicators={indicators}
         openInterest={openInterestUSD}
         onOpenPaperTrade={onOpenPaperTrade}
         onQuickFollowTrade={onQuickFollowTrade}
-      />
+      />}
     </div>
   );
 }

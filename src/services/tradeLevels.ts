@@ -1,4 +1,4 @@
-import { formatCryptoPrice } from './utils';
+import { formatCryptoPrice } from './utils.ts';
 
 export interface TradeIndicatorSnapshot {
   rsi: number | null;
@@ -51,9 +51,10 @@ export function deriveSuggestedTradeLevels(
   const conservativeEntry = isLong ? bb.lower : bb.upper;
   const aggressiveEntry = bb.middle;
   const stopLoss = isLong ? conservativeEntry * 0.985 : conservativeEntry * 1.015;
-  const riskAmount = Math.abs(conservativeEntry - stopLoss);
-  const takeProfit1 = isLong ? conservativeEntry + riskAmount * 1.5 : conservativeEntry - riskAmount * 1.5;
-  const takeProfit2 = isLong ? conservativeEntry + riskAmount * 2.0 : conservativeEntry - riskAmount * 2.0;
+  const targetAnchor = isLong ? Math.max(currentPrice, aggressiveEntry) : Math.min(currentPrice, aggressiveEntry);
+  const riskAmount = Math.abs(targetAnchor - stopLoss);
+  const takeProfit1 = isLong ? targetAnchor + riskAmount * 1.5 : targetAnchor - riskAmount * 1.5;
+  const takeProfit2 = isLong ? targetAnchor + riskAmount * 2.0 : targetAnchor - riskAmount * 2.0;
 
   return {
     side,

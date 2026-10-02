@@ -9,7 +9,7 @@ function createWindow() {
       nodeIntegration: false,
       contextIsolation: true,
     },
-    title: "Antigravity Crypto - 收割機駕駛艙",
+    title: "Antigravity Crypto - 交易監控工作台",
     autoHideMenuBar: true
   });
 
