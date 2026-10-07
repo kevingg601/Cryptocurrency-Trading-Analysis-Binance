@@ -12,6 +12,7 @@ export default function EquityChart({ points, initialCapital, theme }: Props) {
   const container = useRef<HTMLDivElement>(null);
   const chart = useRef<IChartApi | null>(null);
   const series = useRef<ISeriesApi<'Baseline'> | null>(null);
+  const fitted = useRef(false);
   useEffect(() => {
     if (!container.current) return;
     const instance = createChart(container.current, {
@@ -23,6 +24,7 @@ export default function EquityChart({ points, initialCapital, theme }: Props) {
       localization: { locale: 'zh-TW', priceFormatter: (value: number) => value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) },
     });
     chart.current = instance;
+    fitted.current = false;
     series.current = instance.addSeries(BaselineSeries, {
       baseValue: { type: 'price', price: initialCapital },
       topLineColor: '#69d6a0', bottomLineColor: '#ff858b',
@@ -35,7 +37,10 @@ export default function EquityChart({ points, initialCapital, theme }: Props) {
 
   useEffect(() => {
     series.current?.setData(points.map(point => ({ time: point.time as UTCTimestamp, value: point.equity })));
-    chart.current?.timeScale().fitContent();
+    if (!fitted.current && points.length > 1) {
+      chart.current?.timeScale().fitContent();
+      fitted.current = true;
+    }
   }, [points, theme, initialCapital]);
 
   return <div ref={container} className="equity-chart-canvas" role="img" aria-label={`帳戶淨值走勢，起始 ${initialCapital}，最終 ${points.at(-1)?.equity.toFixed(2) ?? '--'} USDT`} />;

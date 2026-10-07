@@ -1,4 +1,6 @@
 import { formatCryptoPrice } from './utils.ts';
+import { describeEntry, validateProtection } from './orderValidation.ts';
+import type { EntryObservation } from './orderValidation';
 
 export interface TradeIndicatorSnapshot {
   rsi: number | null;
@@ -16,6 +18,11 @@ export interface SuggestedTradeLevels {
   stopLoss: number;
   takeProfit1: number;
   takeProfit2: number;
+  conservativePlan: EntryObservation;
+  aggressivePlan: EntryObservation;
+  marketPlanValid: boolean;
+  marketPlanIssue: string | null;
+  targetAnchor: number;
 }
 
 export function deriveSuggestedTradeLevels(
@@ -24,6 +31,8 @@ export function deriveSuggestedTradeLevels(
 ): SuggestedTradeLevels | null {
   const { rsi, sma20, ema50, bb, macd } = indicators;
   if (!bb || !macd) return null;
+  if (![currentPrice, bb.lower, bb.middle, bb.upper].every(value => Number.isFinite(value) && value > 0)
+    || bb.lower > bb.middle || bb.middle > bb.upper) return null;
 
   let rsiScore = 0;
   if (rsi !== null) {
@@ -55,6 +64,8 @@ export function deriveSuggestedTradeLevels(
   const riskAmount = Math.abs(targetAnchor - stopLoss);
   const takeProfit1 = isLong ? targetAnchor + riskAmount * 1.5 : targetAnchor - riskAmount * 1.5;
   const takeProfit2 = isLong ? targetAnchor + riskAmount * 2.0 : targetAnchor - riskAmount * 2.0;
+  if (![stopLoss, takeProfit1, takeProfit2].every(value => Number.isFinite(value) && value > 0)) return null;
+  const marketPlanIssue = validateProtection(side, currentPrice, takeProfit1, stopLoss);
 
   return {
     side,
@@ -64,6 +75,11 @@ export function deriveSuggestedTradeLevels(
     stopLoss,
     takeProfit1,
     takeProfit2,
+    conservativePlan: describeEntry(side, conservativeEntry, currentPrice),
+    aggressivePlan: describeEntry(side, aggressiveEntry, currentPrice),
+    marketPlanValid: marketPlanIssue === null,
+    marketPlanIssue,
+    targetAnchor,
   };
 }
 

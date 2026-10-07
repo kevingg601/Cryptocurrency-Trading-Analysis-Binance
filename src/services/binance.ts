@@ -1,3 +1,5 @@
+import { connectMarketStreams } from './marketStream.ts';
+import type { StreamStatusCallback } from './marketStream';
 // Binance API and WebSocket integration service supporting Spot and Futures dynamically
 
 export type MarketType = 'spot' | 'futures';
@@ -20,6 +22,10 @@ export interface TickerData {
   volume: number;
   quoteVolume: number;
   open: number;
+  priceTimestamp?: number;
+  receivedAt?: number;
+  priceSource?: 'trade' | 'ticker' | 'rest';
+  tradeId?: number;
 }
 
 export interface AggregateTradeData {
@@ -29,6 +35,7 @@ export interface AggregateTradeData {
   quoteValue: number;
   side: 'buy' | 'sell';
   timestamp: number;
+  lastTradeId?: number;
 }
 
 export interface KlineData {
@@ -38,6 +45,7 @@ export interface KlineData {
   low: number;
   close: number;
   volume: number;
+  lastTradeId?: number;
 }
 
 // Popular coin metadata lookup for high-quality names and logos
@@ -157,6 +165,7 @@ export async function fetchSupportedCoins(marketType: MarketType = 'spot'): Prom
 
 // Fetch all symbols' tickers in a single request
 export async function fetchTickers(marketType: MarketType = 'spot'): Promise<TickerData[]> {
+  const requestedAt = Date.now();
   try {
     const response = await fetchWithTimeout(`${getRestBase(marketType)}/ticker/24hr`, {}, 3000);
     if (!response.ok) {
@@ -177,6 +186,8 @@ export async function fetchTickers(marketType: MarketType = 'spot'): Promise<Tic
       volume: parseFloat(item.volume),
       quoteVolume: parseFloat(item.quoteVolume),
       open: parseFloat(item.openPrice || item.open),
+      priceSource: 'rest' as const,
+      receivedAt: requestedAt,
     }));
   } catch (error) {
     console.warn(`Failed to fetch initial 24h ${marketType} tickers, waiting for WebSocket ticks:`, error);
@@ -254,233 +265,79 @@ export interface WsConnection {
   reconnect: () => void;
 }
 
-interface BinanceAggregateTradePayload {
-  e?: string;
-  s?: string;
-  p?: string;
-  q?: string;
-  m?: boolean;
-  T?: number;
+interface StreamPayload {
+  e?: string; s?: string; p?: string; q?: string; m?: boolean; T?: number; E?: number;
+  l?: number; c?: string; P?: string; h?: string; v?: string; o?: string; C?: number; st?: number;
+  k?: { t: number; o: string; h: string; l: string; c: string; v: string; L?: number };
 }
 
-// Subscribe to aggregate trades for the most liquid symbols. Binance's `m`
-// flag identifies whether the buyer was the maker, allowing taker-side inference.
+function unwrapPayload(payload: unknown): StreamPayload[] {
+  const wrapped = payload as { data?: unknown };
+  const data = wrapped?.data ?? payload;
+  return (Array.isArray(data) ? data : [data]).filter(item => item && typeof item === 'object');
+}
+
+// Stream subscriptions are sharded, not truncated to the first 60 symbols.
 export function connectAggregateTradeWebSocket(
   marketType: MarketType,
   symbols: string[],
-  onTrade: (trade: AggregateTradeData) => void
+  onTrade: (trade: AggregateTradeData) => void,
+  onStatus?: StreamStatusCallback,
 ): WsConnection {
-  let ws: WebSocket | null = null;
-  let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-  let attempts = 0;
-  let active = true;
-
-  const monitoredSymbols = Array.from(new Set(symbols)).slice(0, 60);
-
-  const connect = () => {
-    if (!active || monitoredSymbols.length === 0) return;
-
-    ws?.close();
-    attempts += 1;
-
-    const host = marketType === 'spot'
-      ? 'wss://stream.binance.com:9443'
-      : 'wss://fstream.binance.com';
-    const streams = monitoredSymbols
-      .map((symbol) => `${symbol.toLowerCase()}@aggTrade`)
-      .join('/');
-
-    ws = new WebSocket(`${host}/stream?streams=${streams}`);
-
-    ws.onopen = () => {
-      attempts = 0;
-    };
-
-    ws.onmessage = (event) => {
-      try {
-        const parsed = JSON.parse(event.data) as {
-          data?: BinanceAggregateTradePayload;
-        } & BinanceAggregateTradePayload;
-        const data = parsed.data ?? parsed;
-        const price = Number(data.p);
-        const quantity = Number(data.q);
-
-        if (
-          data.e !== 'aggTrade' ||
-          !data.s?.endsWith('USDT') ||
-          !Number.isFinite(price) ||
-          !Number.isFinite(quantity)
-        ) {
-          return;
-        }
-
-        onTrade({
-          symbol: data.s,
-          price,
-          quantity,
-          quoteValue: price * quantity,
-          side: data.m ? 'sell' : 'buy',
-          timestamp: data.T ?? Date.now(),
-        });
-      } catch (error) {
-        console.error(`Error parsing ${marketType} aggregate trade:`, error);
-      }
-    };
-
-    ws.onclose = () => {
-      if (!active) return;
-      const delay = Math.min(1000 * (2 ** Math.max(attempts - 1, 0)), 30000);
-      reconnectTimer = setTimeout(connect, delay);
-    };
-  };
-
-  connect();
-
-  return {
-    close: () => {
-      active = false;
-      if (reconnectTimer) clearTimeout(reconnectTimer);
-      ws?.close();
-    },
-    reconnect: () => {
-      attempts = 0;
-      connect();
-    },
-  };
+  return connectMarketStreams(marketType, symbols.map(symbol => `${symbol.toLowerCase()}@aggTrade`), payload => {
+    let valid = false;
+    for (const data of unwrapPayload(payload)) {
+      const price = Number(data.p), quantity = Number(data.q);
+      if (data.e !== 'aggTrade' || data.st === 2 || !data.s?.endsWith('USDT') || !Number.isFinite(price) || price <= 0 || !Number.isFinite(quantity) || quantity <= 0 || !Number.isFinite(data.T)) continue;
+      valid = true;
+      onTrade({ symbol: data.s, price, quantity, quoteValue: price * quantity, side: data.m ? 'sell' : 'buy', timestamp: data.T!, lastTradeId: data.l });
+    }
+    return valid;
+  }, onStatus);
 }
 
 // Connect to Binance All Tickers WebSocket Stream (Spot or Futures) with auto-reconnect
 export function connectTickerWebSocket(
   marketType: MarketType = 'spot',
   onUpdate: (data: Array<Partial<TickerData> & { symbol: string }>) => void,
-  onStatusChange?: (status: 'connecting' | 'connected' | 'disconnected', attempts: number) => void,
+  onStatusChange?: StreamStatusCallback,
   symbols: string[] = []
 ): WsConnection {
-  let ws: WebSocket | null = null;
-  let reconnectTimer: any = null;
-  let attempts = 0;
-  let active = true;
+  const list = symbols.length ? symbols : FALLBACK_COINS.map(coin => coin.symbol);
+  const streams = marketType === 'futures' ? ['!ticker@arr'] : list.map(symbol => `${symbol.toLowerCase()}@ticker`);
+  return connectMarketStreams(marketType, streams, payload => {
+    const receivedAt = Date.now();
+    const batch = unwrapPayload(payload).filter(data => data.e === '24hrTicker' && data.st !== 2 && data.s?.endsWith('USDT') && Number(data.c) > 0)
+      .map(data => ({
+        symbol: data.s!, price: Number(data.c), priceChangePercent: Number(data.P),
+        high: Number(data.h), low: Number(data.l), volume: Number(data.v), quoteVolume: Number(data.q), open: Number(data.o),
+        priceTimestamp: data.C ?? data.E, receivedAt, priceSource: 'ticker' as const,
+      }));
+    if (!batch.length) return false;
+    onUpdate(batch);
+    return true;
+  }, onStatusChange);
+}
 
-  const connect = () => {
-    if (!active) return;
-    if (ws) {
-      try {
-        ws.close();
-      } catch (e) {
-        // Ignore
-      }
+export function connectKlineWebSocket(market: MarketType, symbol: string, interval: string, onCandle: (candle: KlineData) => void, onStatus?: StreamStatusCallback, onResume?: () => void): WsConnection {
+  return connectMarketStreams(market, [`${symbol.toLowerCase()}@kline_${interval}`], payload => {
+    let valid = false;
+    for (const data of unwrapPayload(payload)) {
+      const k = data.k;
+      if (data.e !== 'kline' || data.st === 2 || data.s !== symbol || !k || ![k.t, Number(k.o), Number(k.h), Number(k.l), Number(k.c), Number(k.v)].every(Number.isFinite) || Number(k.c) <= 0) continue;
+      onCandle({ time: Math.floor(k.t / 1000), open: Number(k.o), high: Number(k.h), low: Number(k.l), close: Number(k.c), volume: Number(k.v), lastTradeId: k.L });
+      valid = true;
     }
+    return valid;
+  }, onStatus, onResume);
+}
 
-    attempts++;
-    if (onStatusChange) {
-      onStatusChange('connecting', attempts);
-    }
-    
-    let wsUrl = '';
-    if (marketType === 'futures') {
-      // Futures: /market/ws/!ticker@arr works perfectly
-      wsUrl = `wss://fstream.binance.com/market/ws/!ticker@arr`;
-    } else {
-      // Spot: /ws/!ticker@arr is silent/blocked. Use combined streams for specified symbols
-      const list = symbols.length > 0 ? symbols : FALLBACK_COINS.map(c => c.symbol);
-      const streams = list.map(s => `${s.toLowerCase()}@ticker`).join('/');
-      wsUrl = `wss://stream.binance.com:9443/stream?streams=${streams}`;
-    }
-
-    console.log(`Connecting to ${marketType} WebSocket: ${wsUrl} (Attempt ${attempts})...`);
-    ws = new WebSocket(wsUrl);
-
-    ws.onopen = () => {
-      if (!active) {
-        ws?.close();
-        return;
-      }
-      attempts = 0;
-      console.log(`Successfully connected to ${marketType} WebSocket.`);
-      if (onStatusChange) {
-        onStatusChange('connected', 0);
-      }
-    };
-
-    ws.onmessage = (event) => {
-      if (!active) return;
-      try {
-        const payload = JSON.parse(event.data);
-        let rawUpdates: any[] = [];
-
-        if (Array.isArray(payload)) {
-          // Futures raw array
-          rawUpdates = payload;
-        } else if (payload.data) {
-          // Spot combined stream wrapper
-          rawUpdates = [payload.data];
-        } else if (payload.s) {
-          // Raw single ticker fallback
-          rawUpdates = [payload];
-        }
-
-        if (rawUpdates.length > 0) {
-          // Filter tickers for USDT symbols
-          const usdtUpdates = rawUpdates.filter((item: any) => item.s && item.s.endsWith('USDT'));
-          
-          const mapped = usdtUpdates.map((d: any) => ({
-            symbol: d.s, // Symbol name e.g. BTCUSDT
-            price: parseFloat(d.c),
-            priceChangePercent: parseFloat(d.P),
-            high: parseFloat(d.h),
-            low: parseFloat(d.l),
-            volume: parseFloat(d.v),
-            quoteVolume: parseFloat(d.q),
-          }));
-
-          if (mapped.length > 0) {
-            onUpdate(mapped);
-          }
-        }
-      } catch (e) {
-        console.error(`Error parsing ${marketType} WebSocket message:`, e);
-      }
-    };
-
-    ws.onerror = (err) => {
-      console.error(`${marketType} WebSocket error:`, err);
-    };
-
-    ws.onclose = (event) => {
-      if (!active) return;
-      console.log(`${marketType} WebSocket closed (code: ${event.code}).`);
-      if (onStatusChange) {
-        onStatusChange('disconnected', attempts);
-      }
-      
-      // Reconnect with exponential backoff (max 30s)
-      const delay = Math.min(1000 * Math.pow(2, attempts - 1), 30000);
-      console.log(`Reconnecting to ${marketType} WebSocket in ${delay}ms...`);
-      
-      clearTimeout(reconnectTimer);
-      reconnectTimer = setTimeout(() => {
-        connect();
-      }, delay);
-    };
-  };
-
-  connect();
-
-  return {
-    close: () => {
-      active = false;
-      clearTimeout(reconnectTimer);
-      if (ws) {
-        try {
-          ws.close();
-        } catch (e) {
-          // Ignore
-        }
-      }
-    },
-    reconnect: () => {
-      attempts = 0;
-      connect();
-    }
-  };
+export async function fetchLatestPrice(symbol: string, market: MarketType): Promise<Partial<TickerData> & { symbol: string }> {
+  const receivedAt = Date.now();
+  const response = await fetchWithTimeout(`${getRestBase(market)}/ticker/price?symbol=${encodeURIComponent(symbol)}`);
+  if (!response.ok) throw new Error(`Price request failed: ${response.status}`);
+  const data = await response.json();
+  const price = Number(data.price);
+  if (!Number.isFinite(price) || price <= 0) throw new Error('Invalid price response');
+  return { symbol, price, receivedAt, priceSource: 'rest' };
 }

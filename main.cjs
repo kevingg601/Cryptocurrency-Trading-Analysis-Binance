@@ -8,6 +8,7 @@ function createWindow() {
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
+      backgroundThrottling: false,
     },
     title: "Antigravity Crypto - 交易監控工作台",
     autoHideMenuBar: true

@@ -1,0 +1,158 @@
+.auto-trading {
+  min-width: 0;
+  width: 100%;
+  color: var(--text-primary);
+  font-size: 12px;
+  line-height: 1.5;
+  letter-spacing: 0;
+}
+
+.auto-trading button, .auto-trading input, .auto-trading select { font: inherit; }
+.auto-trading button, .auto-trading summary, .auto-trading select { cursor: pointer; }
+.auto-trading button:disabled { cursor: not-allowed; opacity: 0.45; }
+.auto-trading :is(button, input, select, summary, [tabindex]):focus-visible { outline: 2px solid var(--accent-secondary); outline-offset: 3px; }
+.auto-trading svg { flex-shrink: 0; }
+.auto-trading h2, .auto-trading h3, .auto-trading p, .auto-trading dl, .auto-trading dd { margin: 0; }
+.auto-trading h2 { font-size: 18px; font-weight: 700; }
+.auto-trading h3 { font-size: 13px; font-weight: 650; }
+.at-header { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 14px; padding: 16px 0 12px; }
+.at-title { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.at-title > svg { color: var(--accent-secondary); }
+.at-title p { color: var(--text-secondary); margin-top: 3px; }
+.at-controls, .at-exports, .at-dialog-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.at-button, .at-icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 36px;
+  max-width: 100%;
+  padding: 7px 10px;
+  border: 1px solid var(--border-glass);
+  border-radius: 6px;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  font-weight: 600;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+.at-icon-button { width: 36px; padding: 0; flex: 0 0 36px; }
+.at-button:hover:not(:disabled), .at-icon-button:hover:not(:disabled) { background: var(--bg-glass-hover); border-color: var(--text-muted); }
+.at-button.at-primary { background: var(--accent-primary); color: var(--bg-primary); border-color: var(--accent-primary); }
+.at-button.at-primary:hover:not(:disabled) { filter: brightness(1.08); background: var(--accent-primary); }
+.at-button.at-danger { color: var(--trend-down); }
+.at-status { display: inline-flex; align-items: center; min-height: 28px; padding: 3px 8px; border-left: 2px solid var(--text-muted); color: var(--text-secondary); }
+.at-status-running { border-color: var(--trend-up); color: var(--trend-up); }
+.at-status-paused, .at-status-draining, .at-status-interrupted { border-color: var(--accent-secondary); color: var(--accent-secondary); }
+.auto-trading .at-risk { display: flex; align-items: flex-start; gap: 7px; color: var(--text-secondary); font-size: 11px; padding-bottom: 14px; }
+.at-risk svg { margin-top: 1px; }
+.auto-trading .at-notice { display: flex; align-items: flex-start; gap: 7px; margin: 0 0 12px; border-left: 3px solid var(--accent-secondary); padding: 10px 12px; background: var(--bg-secondary); overflow-wrap: anywhere; }
+.at-notice svg { margin-top: 1px; }
+.auto-trading .at-error { border-color: var(--trend-down); }
+.at-batchbar { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; padding: 12px 0; border-block: 1px solid var(--border-glass); }
+.at-batchbar > label { display: inline-flex; align-items: center; gap: 6px; color: var(--text-secondary); }
+.at-batchbar select { flex: 1 1 220px; width: 100%; max-width: 460px; min-width: 0; min-height: 36px; padding: 6px 28px 6px 9px; border: 1px solid var(--border-glass); border-radius: 6px; color: var(--text-primary); background: var(--bg-secondary); text-overflow: ellipsis; }
+.at-exports { margin-left: auto; }
+.auto-trading .at-batch-meta { display: flex; flex-wrap: wrap; gap: 8px 24px; padding: 10px 0 14px; font-size: 11px; }
+.at-batch-meta > div { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; max-width: 100%; }
+.at-batch-meta dt { color: var(--text-muted); }
+.at-batch-meta dd { overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.at-overview { display: grid; grid-template-columns: minmax(0, 1fr) 280px; align-items: start; gap: 24px; padding: 16px 0 0; }
+.at-settings-side { min-width: 0; border-left: 1px solid var(--border-glass); padding-left: 16px; }
+.at-settings { padding: 0 0 16px; }
+.at-settings fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
+.at-settings legend { display: flex; align-items: center; gap: 7px; margin-bottom: 12px; padding: 0; font-size: 13px; font-weight: 600; }
+.at-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.at-fields label { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.at-fields label > span { min-height: 33px; color: var(--text-secondary); font-size: 11px; overflow-wrap: anywhere; }
+.at-fields input { width: 100%; min-width: 0; min-height: 36px; padding: 7px 10px; border: 1px solid var(--border-glass); border-radius: 6px; background: var(--bg-secondary); color: var(--text-primary); font-variant-numeric: tabular-nums; }
+.at-fields input:disabled { color: var(--text-secondary); opacity: 1; cursor: not-allowed; }
+.at-settings-footer { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; margin-top: 12px; }
+.at-settings-footer > span { display: inline-flex; align-items: center; gap: 6px; color: var(--text-secondary); font-size: 11px; }
+.at-performance { min-width: 0; }
+.auto-trading .at-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border-bottom: 1px solid var(--border-glass); }
+.at-stats > div { min-width: 0; padding: 0 14px 16px 0; }
+.at-stats dt { color: var(--text-secondary); font-size: 11px; margin-bottom: 6px; }
+.at-stats dd { font-size: 20px; font-weight: 650; line-height: 1.3; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.at-stats small { display: inline-block; font-size: 10px; color: var(--text-secondary); font-weight: 400; margin-left: 5px; }
+.at-positive { color: var(--trend-up); }
+.at-negative { color: var(--trend-down); }
+.at-costs { display: flex; align-items: center; flex-wrap: wrap; gap: 7px 22px; padding: 10px 0; color: var(--text-secondary); font-size: 11px; }
+.at-costs strong { color: var(--text-primary); font-weight: 500; margin-left: 5px; font-variant-numeric: tabular-nums; }
+.at-chart-heading { display: flex; justify-content: space-between; flex-wrap: wrap; align-items: center; gap: 8px; margin: 10px 0; }
+.at-chart-heading > span, .at-caption { color: var(--text-secondary); font-size: 11px; }
+.auto-trading .equity-chart-canvas { width: 100%; height: 260px; border: 0; border-radius: 0; margin: 0 0 16px; }
+.at-chart-empty { display: grid; place-items: center; height: 260px; margin-bottom: 16px; background: var(--bg-secondary); color: var(--text-secondary); }
+.at-records { border-top: 1px solid var(--border-glass); min-width: 0; }
+.at-records-heading { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; border-bottom: 1px solid var(--border-glass); }
+.at-tabs { display: flex; align-items: stretch; min-width: 0; }
+.at-tabs button { display: flex; align-items: center; gap: 6px; min-height: 42px; padding: 9px 12px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--text-secondary); }
+.at-tabs button[aria-selected='true'] { border-bottom-color: var(--accent-primary); color: var(--accent-primary); }
+.at-tabs button:hover { background: var(--bg-secondary); }
+.at-tabs button > span { font-variant-numeric: tabular-nums; font-size: 10px; }
+.at-table-scroll { max-width: 100%; max-height: 480px; overflow: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
+.at-table { width: 100%; border-collapse: collapse; font-size: 11px; font-variant-numeric: tabular-nums; }
+.at-table th { position: sticky; top: 0; z-index: 1; background: var(--bg-primary); color: var(--text-secondary); font-weight: 500; }
+.at-table :is(th, td) { padding: 11px 12px; border-bottom: 1px solid var(--border-glass); text-align: right; white-space: nowrap; vertical-align: top; }
+.at-table :is(th, td):first-child { text-align: left; padding-left: 0; }
+.at-table small { display: block; margin-top: 4px; color: var(--text-secondary); font-size: 10px; }
+.at-table tbody tr:hover { background: var(--bg-secondary); }
+.at-symbol { padding: 0; min-height: 26px; color: var(--accent-secondary); border: 0; background: transparent; font-weight: 600; text-align: left; }
+.at-symbol:hover { text-decoration: underline; }
+.at-table .at-message { min-width: 140px; max-width: 420px; white-space: normal; overflow-wrap: anywhere; text-align: left; }
+.at-event-table :is(th, td) { text-align: left; }
+.at-event-table td:last-child { width: 100%; min-width: 220px; }
+.at-tag { display: inline-block; color: var(--trend-up); font-size: 10px; margin-left: 6px; }
+.auto-trading .at-warning { color: var(--accent-secondary); }
+.auto-trading .at-empty { padding: 28px 12px; color: var(--text-secondary); text-align: center; }
+.at-filter { display: inline-flex; align-items: center; gap: 8px; min-height: 42px; color: var(--text-secondary); cursor: pointer; }
+.at-filter input { width: 16px; height: 16px; accent-color: var(--accent-primary); }
+.at-pagination { display: flex; justify-content: flex-end; align-items: center; flex-wrap: wrap; gap: 8px; padding: 12px 0; font-size: 11px; color: var(--text-secondary); }
+.at-pagination > span:first-child { margin-right: auto; }
+.at-trade-toolbar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; padding: 10px 0; }
+.at-trade-views { display: flex; flex-wrap: wrap; gap: 2px; border-bottom: 1px solid var(--border-glass); }
+.at-trade-views button { min-height: 36px; padding: 6px 9px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--text-secondary); }
+.at-trade-views button[aria-pressed='true'] { color: var(--accent-secondary); border-bottom-color: var(--accent-secondary); }
+.at-signal-settings { margin-bottom: 14px; color: var(--text-secondary); font-size: 11px; }
+.at-signal-settings summary { min-height: 32px; padding: 5px 0; }
+.at-signal-settings dl { display: flex; flex-wrap: wrap; gap: 8px 20px; padding: 8px 0; }
+.at-signal-settings dl > div { display: flex; flex-wrap: wrap; gap: 8px; min-width: 0; }
+.at-signal-settings dt { overflow-wrap: anywhere; }
+.at-signal-settings dd { font-variant-numeric: tabular-nums; color: var(--text-primary); }
+.at-comparison { margin-top: 16px; border-top: 1px solid var(--border-glass); }
+.at-comparison > summary { min-height: 42px; padding: 12px 0; color: var(--text-secondary); font-weight: 600; }
+.at-comparison-selected { background: var(--bg-secondary); }
+.at-table .at-batch-id { max-width: 220px; overflow-wrap: anywhere; white-space: normal; }
+.at-orders { border-top: 1px solid var(--border-glass); margin-top: 12px; }
+.at-orders summary { padding: 12px 0; color: var(--text-secondary); }
+.at-dialog { position: fixed; inset: 0; width: min(440px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); overflow: auto; margin: auto; padding: 20px; border: 1px solid var(--border-glass); border-radius: 8px; color: var(--text-primary); background: var(--bg-secondary); font: inherit; }
+.at-dialog::backdrop { background: rgb(0 0 0 / 60%); }
+.auto-trading .at-dialog h3 { font-size: 16px; }
+.auto-trading .at-dialog p { margin: 12px 0 20px; color: var(--text-secondary); overflow-wrap: anywhere; }
+.at-dialog-actions { justify-content: flex-end; }
+.at-sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
+
+@media (max-width: 1000px) {
+  .at-overview { grid-template-columns: minmax(0, 1fr); gap: 16px; }
+  .at-settings-side { border-left: 0; border-top: 1px solid var(--border-glass); padding: 14px 0 0; }
+  .at-controls { width: 100%; }
+}
+@media (max-width: 600px) {
+  .at-header { padding-top: 12px; }
+  .at-title { align-items: flex-start; }
+  .at-title > svg { margin-top: 3px; }
+  .at-controls { gap: 6px; }
+  .at-controls > .at-status { width: 100%; }
+  .at-button { padding: 8px; }
+  .at-fields, .auto-trading .at-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .at-fields { gap: 12px; }
+  .at-stats dd { font-size: 18px; }
+  .at-batchbar > select { max-width: none; flex-basis: calc(100% - 60px); }
+  .at-exports { margin-left: 0; width: 100%; }
+  .at-exports > button { flex: 1; }
+  .at-records-heading { padding-bottom: 6px; }
+  .at-caption { margin-left: 12px; }
+  .at-tabs button { padding-inline: 10px; }
+  .at-costs { gap: 8px 16px; }
+  .auto-trading .equity-chart-canvas, .at-chart-empty { height: 220px; }
+}

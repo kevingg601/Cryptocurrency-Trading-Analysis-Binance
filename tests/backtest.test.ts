@@ -56,7 +56,7 @@ test('profit targets remain beyond both market and suggested entries', () => {
   const long = deriveSuggestedTradeLevels(110, bullish)!;
   assert.equal(long.side, 'LONG');
   assert.ok(long.takeProfit1 > 110 && long.takeProfit1 > long.aggressiveEntry);
-  const short = deriveSuggestedTradeLevels(70, { ...bullish, rsi: 80, macd: { macd: -2, signal: -1, histogram: -1 } })!;
+  const short = deriveSuggestedTradeLevels(110, { ...bullish, rsi: 80, macd: { macd: -2, signal: -1, histogram: -1 } })!;
   assert.equal(short.side, 'SHORT');
-  assert.ok(short.takeProfit1 < 70 && short.takeProfit1 < short.aggressiveEntry);
+  assert.ok(short.takeProfit1 < 110 && short.takeProfit1 < short.aggressiveEntry);
 });

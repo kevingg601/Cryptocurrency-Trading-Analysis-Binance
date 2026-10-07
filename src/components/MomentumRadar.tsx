@@ -114,7 +114,10 @@ export default function MomentumRadar({
             const isUp = ticker.priceChangePercent >= 0;
 
             return (
-              <div
+              <button
+                type="button"
+                aria-label={`查看 ${coin.baseAsset} 動能 K 線`}
+                aria-pressed={isSelected}
                 key={coin.symbol}
                 className="watchlist-item"
                 style={{
@@ -158,7 +161,7 @@ export default function MomentumRadar({
                     {isUp ? '+' : ''}{ticker.priceChangePercent.toFixed(2)}%
                   </div>
                 </div>
-              </div>
+              </button>
             );
           })
         )}

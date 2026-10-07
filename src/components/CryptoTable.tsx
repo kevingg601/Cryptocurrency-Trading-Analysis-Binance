@@ -12,6 +12,7 @@ interface CryptoTableProps {
   onToggleWatchlist: (symbol: string) => void;
   marketType: MarketType;
   fundingRates?: Record<string, number>;
+  variant?: 'full' | 'compact';
 }
 
 export default function CryptoTable({
@@ -22,7 +23,8 @@ export default function CryptoTable({
   watchlist,
   onToggleWatchlist,
   marketType,
-  fundingRates
+  fundingRates,
+  variant = 'full'
 }: CryptoTableProps) {
   const [search, setSearch] = useState('');
   const [pageSize, setPageSize] = useState(50);
@@ -30,11 +32,6 @@ export default function CryptoTable({
   const [onlyWatchlist, setOnlyWatchlist] = useState(false);
   const [flashStates, setFlashStates] = useState<Record<string, 'up' | 'down' | null>>({});
   const prevPrices = useRef<Record<string, number>>({});
-
-  // Reset page size when search query changes
-  useEffect(() => {
-    setPageSize(50);
-  }, [search]);
 
   // Hook to track price changes and trigger flashes
   useEffect(() => {
@@ -53,7 +50,7 @@ export default function CryptoTable({
     });
 
     if (hasChanges) {
-      setFlashStates((prev) => ({ ...prev, ...newFlashes }));
+      const startTimer = setTimeout(() => setFlashStates((prev) => ({ ...prev, ...newFlashes })), 0);
       
       // Clear flashes after 800ms
       const timer = setTimeout(() => {
@@ -66,7 +63,7 @@ export default function CryptoTable({
         });
       }, 800);
 
-      return () => clearTimeout(timer);
+      return () => { clearTimeout(startTimer); clearTimeout(timer); };
     }
   }, [tickers]);
 
@@ -98,7 +95,7 @@ export default function CryptoTable({
   const colCount = marketType === 'futures' ? 7 : 6;
 
   return (
-    <div className="card">
+    <div className={`card market-table ${variant === 'compact' ? 'market-table-compact' : ''}`}>
       <div className="card-title">
         <span>加密貨幣即時行情</span>
         <div style={{ fontSize: '12px', color: 'var(--text-secondary)', fontWeight: 'normal' }}>
@@ -110,10 +107,11 @@ export default function CryptoTable({
         <Search size={18} className="search-icon" />
         <input
           type="text"
-          placeholder="搜尋代幣名稱或代號 (例如: BTC, PEPE, WIF...)"
+          aria-label="搜尋行情幣種"
+          placeholder={variant === 'compact' ? '搜尋幣種' : '搜尋代幣名稱或代號 (例如: BTC, PEPE, WIF...)'}
           className="search-input"
           value={search}
-          onChange={(e) => setSearch(e.target.value)}
+          onChange={(e) => { setSearch(e.target.value); setPageSize(50); }}
         />
       </div>
 
@@ -122,8 +120,20 @@ export default function CryptoTable({
         <label className="watchlist-filter"><input type="checkbox" checked={onlyWatchlist} onChange={event => { setOnlyWatchlist(event.target.checked); setPageSize(50); }} /><Star size={14} />只看關注</label>
       </div>
 
-      <div className="crypto-table-container">
-        <table className="crypto-table">
+      <div className="crypto-table-container" role="region" aria-label="行情清單" tabIndex={variant === 'compact' ? 0 : undefined}>
+        {variant === 'compact' ? <div className="compact-market-list">
+          {displayedCoins.map(coin => {
+            const ticker = tickers[coin.symbol];
+            const isWatch = watchlist.includes(coin.symbol);
+            return <div key={coin.symbol} className={`compact-market-row ${selectedSymbol === coin.symbol ? 'selected' : ''}`}>
+              <button className={`watchlist-btn ${isWatch ? 'active' : ''}`} aria-label={`${isWatch ? '取消關注' : '關注'} ${coin.baseAsset}`} aria-pressed={isWatch} title={`${isWatch ? '取消關注' : '關注'} ${coin.baseAsset}`} onClick={() => onToggleWatchlist(coin.symbol)}><Star size={14} fill={isWatch ? 'currentColor' : 'none'} /></button>
+              <button className="compact-market-select" aria-label={`查看 ${coin.baseAsset} K 線`} aria-pressed={selectedSymbol === coin.symbol} onClick={() => onSelectSymbol(coin.symbol)}>
+                <span className="compact-market-name"><strong>{coin.baseAsset}</strong><small>{coin.name}</small></span>
+                <span className={`compact-market-quote ${getFlashClass(coin.symbol)}`}><strong>{ticker ? formatCryptoPrice(ticker.price) : '--'}</strong><small className={(ticker?.priceChangePercent ?? 0) >= 0 ? 'trend-up-text' : 'trend-down-text'}>{ticker ? `${ticker.priceChangePercent >= 0 ? '+' : ''}${ticker.priceChangePercent.toFixed(2)}%` : '等待報價'}</small></span>
+              </button>
+            </div>;
+          })}
+        </div> : <table className="crypto-table">
           <thead>
             <tr>
               <th style={{ width: '40px' }}>自訂</th>
@@ -261,7 +271,7 @@ export default function CryptoTable({
               );
             })}
           </tbody>
-        </table>
+        </table>}
         
         {filteredCoins.length === 0 && (
           <div className="empty-state">

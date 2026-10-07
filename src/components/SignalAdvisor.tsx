@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Compass, TrendingUp, TrendingDown, Zap } from 'lucide-react';
 import { deriveSuggestedTradeLevels } from '../services/tradeLevels';
 import { formatCryptoPrice } from '../services/utils';
+import { validateProtection } from '../services/orderValidation';
 
 interface SignalAdvisorProps {
   symbol: string;
@@ -101,10 +102,10 @@ export default function SignalAdvisor({
   const bbPosition = bbRange > 0 ? (currentPrice - bb.lower) / bbRange : 0.5;
   if (bbPosition <= 0.2) {
     bbScore = 1;
-    bbSignal = '接近下軌支撐 (看多)';
+    bbSignal = currentPrice < bb.lower ? '下軌失守，等待收復' : '接近下軌支撐 (看多)';
   } else if (bbPosition >= 0.8) {
     bbScore = -1;
-    bbSignal = '接近上軌壓力 (看空)';
+    bbSignal = currentPrice > bb.upper ? '突破上軌，等待確認' : '接近上軌壓力 (看空)';
   } else {
     bbSignal = '軌道中震盪';
   }
@@ -131,7 +132,7 @@ export default function SignalAdvisor({
 
   let sentiment = '觀望 / 中性';
   let sentimentColor = '#ffb300'; // Amber
-  let sentimentDesc = '市場目前動能方向不夠明確，建議在區間內低買高賣或等待突破信號。';
+  let sentimentDesc = '市場目前動能方向不夠明確，先觀察，不代表已有可執行的入場條件。';
   let side: 'LONG' | 'SHORT' = 'LONG';
 
   if (totalScore >= 2.0 && bullishVotes >= 3 && bearishVotes === 0) {
@@ -178,6 +179,11 @@ export default function SignalAdvisor({
     (side === 'LONG' && bullishVotes >= 2 && totalScore >= 0.5) ||
     (side === 'SHORT' && bearishVotes >= 2 && totalScore <= -0.5)
   );
+  const canMarketFollow = canQuickFollow && levels.marketPlanValid;
+  const canConservativeLimit = levels.conservativePlan.mode === 'LIMIT'
+    && validateProtection(side, entryConservative, takeProfit1, stopLoss) === null;
+  const canAggressiveLimit = levels.aggressivePlan.mode === 'LIMIT'
+    && validateProtection(side, entryAggressive, takeProfit1, stopLoss) === null;
 
   const coinSymbol = symbol.replace('USDT', '');
 
@@ -206,14 +212,19 @@ export default function SignalAdvisor({
               gap: '6px',
               boxShadow: '0 4px 12px rgba(124, 77, 255, 0.3)'
             }}
-            onClick={() => onOpenPaperTrade(symbol, side, currentPrice, takeProfit1, stopLoss, entryConservative, entryAggressive)}
+            onClick={() => onOpenPaperTrade(symbol, side, currentPrice, levels.marketPlanValid ? takeProfit1 : undefined, levels.marketPlanValid ? stopLoss : undefined, entryConservative, entryAggressive)}
             title={canQuickFollow ? '依照目前單週期訊號建立模擬單' : '目前訊號未共振，仍可手動開單但不建議直接跟單'}
           >
             <Zap size={14} />
-            <span>{canQuickFollow ? '模擬合約交易' : '手動規劃委託'}</span>
+            <span>{canMarketFollow ? '模擬交易委託' : '手動規劃委託'}</span>
           </button>
         )}
       </div>
+
+      {!levels.marketPlanValid && <div className="entry-condition-notice" role="status">
+        <strong>目前不可套用這組點位市價{isLong ? '做多' : '做空'}</strong>
+        <span>現價 ${formatCryptoPrice(currentPrice)}；下方為{isLong ? '收復' : '跌破'}觀察價後的條件規劃。止盈／止損不適用於目前價格，需重新確認後才能入場。</span>
+      </div>}
 
       {onQuickFollowTrade && (
         <div style={{
@@ -235,6 +246,8 @@ export default function SignalAdvisor({
             <>
               <button
                 onClick={() => onQuickFollowTrade(symbol, side, currentPrice, 'MARKET', takeProfit1, stopLoss)}
+                disabled={!canMarketFollow}
+                title={canMarketFollow ? '以最新價格再次檢查模擬市價委託' : '目前止盈／止損與現價不符，不能市價跟單'}
                 className="action-btn"
                 style={{
                   fontSize: '12px',
@@ -247,10 +260,12 @@ export default function SignalAdvisor({
                   fontWeight: 600
                 }}
               >
-                一鍵市價跟單
+                {canMarketFollow ? '一鍵市價跟單' : '市價條件未成立'}
               </button>
               <button
                 onClick={() => onQuickFollowTrade(symbol, side, entryConservative, 'LIMIT', takeProfit1, stopLoss)}
+                disabled={!canConservativeLimit}
+                title={levels.conservativePlan.label}
                 className="action-btn"
                 style={{
                   fontSize: '12px',
@@ -263,10 +278,12 @@ export default function SignalAdvisor({
                   fontWeight: 600
                 }}
               >
-                一鍵保守限價跟單
+                {canConservativeLimit ? '保守回撤限價模擬單' : `保守價${isLong ? '待收復' : '待跌破'}`}
               </button>
               <button
                 onClick={() => onQuickFollowTrade(symbol, side, entryAggressive, 'LIMIT', takeProfit1, stopLoss)}
+                disabled={!canAggressiveLimit}
+                title={levels.aggressivePlan.label}
                 className="action-btn"
                 style={{
                   fontSize: '12px',
@@ -279,7 +296,7 @@ export default function SignalAdvisor({
                   fontWeight: 600
                 }}
               >
-                一鍵激進限價跟單
+                {canAggressiveLimit ? '激進回撤限價模擬單' : `激進價${isLong ? '待收復' : '待跌破'}`}
               </button>
             </>
           ) : (
@@ -388,7 +405,7 @@ export default function SignalAdvisor({
               title="點擊複製價格到剪貼簿"
             >
               <div style={{ fontSize: '11px', color: 'var(--text-secondary)', textTransform: 'uppercase', marginBottom: '4px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <span>{isLong ? '建議做多 (保守 - 下軌)' : '建議做空 (保守 - 上軌)'}</span>
+                <span>{isLong ? '做多保守觀察價 · 下軌' : '做空保守觀察價 · 上軌'}</span>
                 <span style={{ 
                   fontSize: '9px', 
                   opacity: copiedId === 'conservative' ? 1 : 0.6, 
@@ -404,6 +421,7 @@ export default function SignalAdvisor({
               <div style={{ fontSize: '18px', fontWeight: 700, color: isLong ? 'var(--accent-secondary)' : 'var(--trend-down)', fontFamily: 'var(--font-display)' }}>
                 ${formatCryptoPrice(entryConservative)}
               </div>
+              <div className="entry-condition-label">{levels.conservativePlan.label}</div>
             </div>
 
             {/* Entry point 2 */}
@@ -421,7 +439,7 @@ export default function SignalAdvisor({
               title="點擊複製價格到剪貼簿"
             >
               <div style={{ fontSize: '11px', color: 'var(--text-secondary)', textTransform: 'uppercase', marginBottom: '4px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <span>{isLong ? '建議做多 (激進 - 中軌)' : '建議做空 (激進 - 中軌)'}</span>
+                <span>{isLong ? '做多激進觀察價 · 中軌' : '做空激進觀察價 · 中軌'}</span>
                 <span style={{ 
                   fontSize: '9px', 
                   opacity: copiedId === 'aggressive' ? 1 : 0.6, 
@@ -437,6 +455,7 @@ export default function SignalAdvisor({
               <div style={{ fontSize: '18px', fontWeight: 700, color: 'var(--accent-primary)', fontFamily: 'var(--font-display)' }}>
                 ${formatCryptoPrice(entryAggressive)}
               </div>
+              <div className="entry-condition-label">{levels.aggressivePlan.label}</div>
             </div>
 
             {/* Take Profit target */}
@@ -454,7 +473,7 @@ export default function SignalAdvisor({
               title="點擊複製價格到剪貼簿"
             >
               <div style={{ fontSize: '11px', color: 'var(--text-secondary)', textTransform: 'uppercase', marginBottom: '4px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <span>{isLong ? '做多止盈目標 (TP1 / TP2)' : '做空止盈目標 (TP1 / TP2)'}</span>
+                <span>{!levels.marketPlanValid ? '條件規劃止盈 (TP1 / TP2)' : isLong ? '做多止盈觀察 (TP1 / TP2)' : '做空止盈觀察 (TP1 / TP2)'}</span>
                 <span style={{ 
                   fontSize: '9px', 
                   opacity: copiedId === 'tp' ? 1 : 0.6, 
@@ -473,6 +492,7 @@ export default function SignalAdvisor({
               <div style={{ fontSize: '11px', color: 'var(--text-secondary)', fontWeight: 500, fontFamily: 'var(--font-display)', marginTop: '2px' }}>
                 TP2: ${formatCryptoPrice(takeProfit2)}
               </div>
+              <div className="entry-condition-label">目標計算基準 ${formatCryptoPrice(levels.targetAnchor)}</div>
             </div>
 
             {/* Stop Loss target */}
@@ -490,7 +510,7 @@ export default function SignalAdvisor({
               title="點擊複製價格到剪貼簿"
             >
               <div style={{ fontSize: '11px', color: 'var(--text-secondary)', textTransform: 'uppercase', marginBottom: '4px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <span>{isLong ? '做多止損點位 (SL)' : '做空止損點位 (SL)'}</span>
+                <span>{!levels.marketPlanValid ? '條件規劃止損 (SL)' : isLong ? '做多止損觀察 (SL)' : '做空止損觀察 (SL)'}</span>
                 <span style={{ 
                   fontSize: '9px', 
                   opacity: copiedId === 'sl' ? 1 : 0.6, 
@@ -506,6 +526,7 @@ export default function SignalAdvisor({
               <div style={{ fontSize: '18px', fontWeight: 700, color: 'var(--trend-down)', fontFamily: 'var(--font-display)' }}>
                 ${formatCryptoPrice(stopLoss)}
               </div>
+              {!levels.marketPlanValid && <div className="entry-condition-label">非目前市價入場的止損</div>}
             </div>
             
             {/* Open Interest dynamic statistic (Futures only) */}

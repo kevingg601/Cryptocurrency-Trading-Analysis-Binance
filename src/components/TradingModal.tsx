@@ -1,11 +1,13 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { X, Info } from 'lucide-react';
 import { formatCryptoPrice, getPricePrecision } from '../services/utils';
 import type { MarketType } from '../services/binance';
+import { describeEntry, validatePaperOrder, validateProtection } from '../services/orderValidation';
 
 interface TradingModalProps {
   isOpen: boolean;
   marketType: MarketType;
+  marketPrice: number | null;
   symbol: string;
   suggestedSide: 'LONG' | 'SHORT';
   suggestedPrice: number;
@@ -20,7 +22,7 @@ interface TradingModalProps {
     size: number,
     takeProfit?: number,
     stopLoss?: number
-  ) => void;
+  ) => boolean | void;
   suggestedTp?: number;
   suggestedSl?: number;
   conservativeEntry?: number;
@@ -30,6 +32,7 @@ interface TradingModalProps {
 export default function TradingModal({
   isOpen,
   marketType,
+  marketPrice,
   symbol,
   suggestedSide,
   suggestedPrice,
@@ -42,48 +45,34 @@ export default function TradingModal({
   aggressiveEntry
 }: TradingModalProps) {
   const [orderType, setOrderType] = useState<'MARKET' | 'LIMIT'>('MARKET');
-  const [side, setSide] = useState<'LONG' | 'SHORT'>('LONG');
+  const initialSide = marketType === 'spot' ? 'LONG' : suggestedSide;
+  const initialReference = marketPrice ?? suggestedPrice;
+  const suggestionsValid = validateProtection(initialSide, initialReference, suggestedTp, suggestedSl) === null;
+  const precision = getPricePrecision(initialReference);
+  const [side, setSide] = useState<'LONG' | 'SHORT'>(initialSide);
   const [price, setPrice] = useState<number>(suggestedPrice);
   const [chosenLeverage, setLeverage] = useState<number>(20);
   const leverage = marketType === 'spot' ? 1 : chosenLeverage;
   const [size, setSize] = useState<string>('1000'); // position size in USDT
   
-  const [useTpSl, setUseTpSl] = useState<boolean>(false);
-  const [takeProfit, setTakeProfit] = useState<string>('');
-  const [stopLoss, setStopLoss] = useState<string>('');
-
-  // Update side and price when suggested suggestions change (e.g. user clicks another coin)
-  useEffect(() => {
-    setSide(marketType === 'spot' ? 'LONG' : suggestedSide);
-    setPrice(suggestedPrice);
-    // Suggest default TP/SL based on direction
-    if (suggestedPrice > 0) {
-      const prec = getPricePrecision(suggestedPrice);
-      
-      if (suggestedTp !== undefined && suggestedTp > 0) {
-        setTakeProfit(suggestedTp.toFixed(prec));
-        setUseTpSl(true);
-      } else {
-        const tp = suggestedSide === 'LONG' ? (suggestedPrice * 1.05).toFixed(prec) : (suggestedPrice * 0.95).toFixed(prec);
-        setTakeProfit(tp);
-      }
-
-      if (suggestedSl !== undefined && suggestedSl > 0) {
-        setStopLoss(suggestedSl.toFixed(prec));
-        setUseTpSl(true);
-      } else {
-        const sl = suggestedSide === 'LONG' ? (suggestedPrice * 0.97).toFixed(prec) : (suggestedPrice * 1.03).toFixed(prec);
-        setStopLoss(sl);
-      }
-    }
-  }, [suggestedSide, suggestedPrice, symbol, suggestedTp, suggestedSl, marketType]);
+  const [useTpSl, setUseTpSl] = useState<boolean>(suggestionsValid && (suggestedTp !== undefined || suggestedSl !== undefined));
+  const [takeProfit, setTakeProfit] = useState<string>(() => (suggestionsValid && suggestedTp !== undefined ? suggestedTp : initialReference * (initialSide === 'LONG' ? 1.05 : 0.95)).toFixed(precision));
+  const [stopLoss, setStopLoss] = useState<string>(() => (suggestionsValid && suggestedSl !== undefined ? suggestedSl : initialReference * (initialSide === 'LONG' ? 0.97 : 1.03)).toFixed(precision));
 
   if (!isOpen) return null;
 
-  const currentPrice = price || suggestedPrice || 0;
+  const livePrice = marketPrice ?? 0;
+  const currentPrice = orderType === 'MARKET' ? livePrice : price;
   const numSize = parseFloat(size) || 0;
   const estMargin = numSize / leverage;
   const isBalanceSufficient = availableBalance >= estMargin;
+  const finalTp = useTpSl && takeProfit !== '' ? Number(takeProfit) : undefined;
+  const finalSl = useTpSl && stopLoss !== '' ? Number(stopLoss) : undefined;
+  const validationError = validatePaperOrder(side, orderType, price, livePrice, finalTp, finalSl)
+    ?? (!Number.isFinite(numSize) || numSize <= 0 ? '請輸入有效的倉位大小。' : estMargin < 5 ? '模擬保證金至少為 5 USDT。' : !isBalanceSufficient ? '可用餘額不足以支付保證金。' : null);
+  const conservativePlan = conservativeEntry ? describeEntry(side, conservativeEntry, livePrice) : null;
+  const aggressivePlan = aggressiveEntry ? describeEntry(side, aggressiveEntry, livePrice) : null;
+  const currentSuggestionValid = side === initialSide && validateProtection(side, currentPrice, suggestedTp, suggestedSl) === null;
 
   // Calculate liquidation price
   const calculateLiqPrice = () => {
@@ -115,49 +104,8 @@ export default function TradingModal({
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-
-    if (numSize <= 0) {
-      alert('請輸入有效的倉位大小！');
-      return;
-    }
-
-    if (estMargin < 5) {
-      alert('保證金必須大於 $5 USDT！');
-      return;
-    }
-
-    if (!isBalanceSufficient) {
-      alert('可用餘額不足以支付保證金！');
-      return;
-    }
-
-    const finalTp = useTpSl && takeProfit ? parseFloat(takeProfit) : undefined;
-    const finalSl = useTpSl && stopLoss ? parseFloat(stopLoss) : undefined;
-
-    // Validate TP/SL prices
-    if (finalTp) {
-      if (side === 'LONG' && finalTp <= currentPrice) {
-        alert('做多止盈價格必須高於委託價格！');
-        return;
-      }
-      if (side === 'SHORT' && finalTp >= currentPrice) {
-        alert('做空止盈價格必須低於委託價格！');
-        return;
-      }
-    }
-
-    if (finalSl) {
-      if (side === 'LONG' && finalSl >= currentPrice) {
-        alert('做多止損價格必須低於委託價格！');
-        return;
-      }
-      if (side === 'SHORT' && finalSl <= currentPrice) {
-        alert('做空止損價格必須高於委託價格！');
-        return;
-      }
-    }
-
-    onSubmit(
+    if (validationError) return;
+    const submitted = onSubmit(
       symbol,
       side,
       orderType,
@@ -167,28 +115,30 @@ export default function TradingModal({
       finalTp,
       finalSl
     );
-    onClose();
+    if (submitted !== false) onClose();
   };
 
   const coinName = symbol.replace('USDT', '');
 
   return (
     <div className="modal-overlay">
-      <div className="modal-card trading-modal-card">
+      <div className="modal-card trading-modal-card" role="dialog" aria-modal="true" aria-labelledby="paper-order-title">
         {/* Header */}
         <div className="modal-header">
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
             <div className={`side-indicator-dot ${side}`} />
-            <h3 className="modal-title">
+            <h3 className="modal-title" id="paper-order-title">
               模擬{marketType === 'spot' ? '現貨' : '合約'}委託 - <strong>{coinName} / USDT</strong>
             </h3>
           </div>
-          <button className="modal-close-btn" onClick={onClose}>
+          <button className="modal-close-btn" onClick={onClose} aria-label="關閉模擬委託">
             <X size={18} />
           </button>
         </div>
 
-        <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+        <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '16px', padding: '16px 20px 20px' }}>
+          <div className="entry-condition-label">最新價格 ${livePrice > 0 ? formatCryptoPrice(livePrice) : '--'} · {orderType === 'MARKET' ? '依送出時最新行情模擬成交' : '僅支援回撤限價，未提供突破觸發單'}</div>
+          {validationError && <div className="order-validation-message" role="alert">{validationError}</div>}
           {/* Order Type Toggle (Market / Limit) */}
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', background: 'rgba(0,0,0,0.2)', padding: '4px', borderRadius: 'var(--radius-sm)' }}>
             <button
@@ -214,10 +164,10 @@ export default function TradingModal({
               className={`side-toggle-btn long ${side === 'LONG' ? 'active' : ''}`}
               onClick={() => {
                 setSide('LONG');
-                if (price > 0) {
-                  const prec = getPricePrecision(price);
-                  setTakeProfit((price * 1.05).toFixed(prec));
-                  setStopLoss((price * 0.97).toFixed(prec));
+                if (currentPrice > 0) {
+                  const prec = getPricePrecision(currentPrice);
+                  setTakeProfit((currentPrice * 1.05).toFixed(prec));
+                  setStopLoss((currentPrice * 0.97).toFixed(prec));
                 }
               }}
             >
@@ -229,10 +179,10 @@ export default function TradingModal({
               disabled={marketType === 'spot'}
               onClick={() => {
                 setSide('SHORT');
-                if (price > 0) {
-                  const prec = getPricePrecision(price);
-                  setTakeProfit((price * 0.95).toFixed(prec));
-                  setStopLoss((price * 1.03).toFixed(prec));
+                if (currentPrice > 0) {
+                  const prec = getPricePrecision(currentPrice);
+                  setTakeProfit((currentPrice * 0.95).toFixed(prec));
+                  setStopLoss((currentPrice * 1.03).toFixed(prec));
                 }
               }}
             >
@@ -242,9 +192,10 @@ export default function TradingModal({
 
           {/* Limit Price Input (Only for LIMIT type) */}
           <div className="form-group" style={{ display: orderType === 'LIMIT' ? 'block' : 'none' }}>
-            <label>委託價格 (USDT)</label>
+            <label htmlFor="paper-order-price">委託價格 (USDT)</label>
             <input
               type="number"
+              id="paper-order-price"
               step="any"
               className="form-input"
               value={price}
@@ -260,48 +211,52 @@ export default function TradingModal({
               required={orderType === 'LIMIT'}
             />
             <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11px', marginTop: '4px', color: 'var(--text-secondary)' }}>
-              <span>最新價格: ${formatCryptoPrice(suggestedPrice)}</span>
-              <span style={{ cursor: 'pointer', color: 'var(--accent-secondary)' }} onClick={() => setPrice(suggestedPrice)}>使用市價</span>
+              <span>最新價格: ${formatCryptoPrice(livePrice)}</span>
+              <button type="button" className="preset-btn" onClick={() => setPrice(livePrice)}>帶入現價</button>
             </div>
             {(conservativeEntry || aggressiveEntry) && (
               <div style={{ display: 'flex', gap: '8px', fontSize: '11px', marginTop: '6px', alignItems: 'center', flexWrap: 'wrap' }}>
-                <span style={{ color: 'var(--text-muted)' }}>AI 建議入場:</span>
+                <span style={{ color: 'var(--text-muted)' }}>觀察價（非觸發單）:</span>
                 {conservativeEntry && (
                   <button
                     type="button"
                     className="preset-btn"
+                    disabled={side !== initialSide || conservativePlan?.mode !== 'LIMIT'}
+                    title={conservativePlan?.label}
                     style={{ padding: '2px 6px', fontSize: '10px', height: 'auto', width: 'auto', display: 'inline-flex' }}
                     onClick={() => {
                       setPrice(conservativeEntry);
                       const prec = getPricePrecision(conservativeEntry);
-                      if (!suggestedTp) {
+                      if (!suggestedTp || !currentSuggestionValid) {
                         setTakeProfit(side === 'LONG' ? (conservativeEntry * 1.05).toFixed(prec) : (conservativeEntry * 0.95).toFixed(prec));
                       }
-                      if (!suggestedSl) {
+                      if (!suggestedSl || !currentSuggestionValid) {
                         setStopLoss(side === 'LONG' ? (conservativeEntry * 0.97).toFixed(prec) : (conservativeEntry * 1.03).toFixed(prec));
                       }
                     }}
                   >
-                    保守 (${formatCryptoPrice(conservativeEntry)})
+                    保守 (${formatCryptoPrice(conservativeEntry)}){conservativePlan?.mode !== 'LIMIT' ? ' · 待確認' : ''}
                   </button>
                 )}
                 {aggressiveEntry && (
                   <button
                     type="button"
                     className="preset-btn"
+                    disabled={side !== initialSide || aggressivePlan?.mode !== 'LIMIT'}
+                    title={aggressivePlan?.label}
                     style={{ padding: '2px 6px', fontSize: '10px', height: 'auto', width: 'auto', display: 'inline-flex' }}
                     onClick={() => {
                       setPrice(aggressiveEntry);
                       const prec = getPricePrecision(aggressiveEntry);
-                      if (!suggestedTp) {
+                      if (!suggestedTp || !currentSuggestionValid) {
                         setTakeProfit(side === 'LONG' ? (aggressiveEntry * 1.05).toFixed(prec) : (aggressiveEntry * 0.95).toFixed(prec));
                       }
-                      if (!suggestedSl) {
+                      if (!suggestedSl || !currentSuggestionValid) {
                         setStopLoss(side === 'LONG' ? (aggressiveEntry * 0.97).toFixed(prec) : (aggressiveEntry * 1.03).toFixed(prec));
                       }
                     }}
                   >
-                    激進 (${formatCryptoPrice(aggressiveEntry)})
+                    激進 (${formatCryptoPrice(aggressiveEntry)}){aggressivePlan?.mode !== 'LIMIT' ? ' · 待確認' : ''}
                   </button>
                 )}
               </div>
@@ -341,7 +296,7 @@ export default function TradingModal({
           {/* Sizing Input (USDT + Percentages) */}
           <div className="form-group">
             <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '6px' }}>
-              <label>名義價值 (Position Size in USDT)</label>
+              <label htmlFor="paper-order-size">名義價值 (Position Size in USDT)</label>
               <span style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
                 餘額: ${availableBalance.toLocaleString(undefined, { maximumFractionDigits: 2 })} USDT
               </span>
@@ -349,6 +304,7 @@ export default function TradingModal({
             <div style={{ position: 'relative' }}>
               <input
                 type="number"
+                id="paper-order-size"
                 step="any"
                 className="form-input"
                 value={size}
@@ -391,18 +347,19 @@ export default function TradingModal({
           {useTpSl && (
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', animation: 'fadeIn 0.2s' }}>
               <div className="form-group">
-                <label style={{ color: 'var(--trend-up)' }}>止盈價格 (Take Profit)</label>
+                <label htmlFor="paper-order-tp" style={{ color: 'var(--trend-up)' }}>止盈價格 (Take Profit)</label>
                 <input
                   type="number"
+                  id="paper-order-tp"
                   step="any"
                   className="form-input"
                   value={takeProfit}
                   onChange={(e) => setTakeProfit(e.target.value)}
                   placeholder="達此價格自動結算"
                 />
-                {suggestedTp !== undefined && suggestedTp > 0 && (
+                {currentSuggestionValid && suggestedTp !== undefined && suggestedTp > 0 && (
                   <div style={{ display: 'flex', gap: '4px', fontSize: '10px', marginTop: '4px', color: 'var(--text-secondary)' }}>
-                    <span>AI 建議:</span>
+                    <span>觀察參考:</span>
                     <span 
                       style={{ cursor: 'pointer', color: 'var(--trend-up)', textDecoration: 'underline' }} 
                       onClick={() => setTakeProfit(suggestedTp.toString())}
@@ -413,18 +370,19 @@ export default function TradingModal({
                 )}
               </div>
               <div className="form-group">
-                <label style={{ color: 'var(--trend-down)' }}>止損價格 (Stop Loss)</label>
+                <label htmlFor="paper-order-sl" style={{ color: 'var(--trend-down)' }}>止損價格 (Stop Loss)</label>
                 <input
                   type="number"
+                  id="paper-order-sl"
                   step="any"
                   className="form-input"
                   value={stopLoss}
                   onChange={(e) => setStopLoss(e.target.value)}
                   placeholder="達此價格自動退場"
                 />
-                {suggestedSl !== undefined && suggestedSl > 0 && (
+                {currentSuggestionValid && suggestedSl !== undefined && suggestedSl > 0 && (
                   <div style={{ display: 'flex', gap: '4px', fontSize: '10px', marginTop: '4px', color: 'var(--text-secondary)' }}>
-                    <span>AI 建議:</span>
+                    <span>觀察參考:</span>
                     <span 
                       style={{ cursor: 'pointer', color: 'var(--trend-down)', textDecoration: 'underline' }} 
                       onClick={() => setStopLoss(suggestedSl.toString())}
@@ -468,6 +426,7 @@ export default function TradingModal({
           {/* Submit Button */}
           <button
             type="submit"
+            disabled={validationError !== null}
             className="btn-primary"
             style={{
               background: side === 'LONG' ? 'var(--trend-up)' : 'var(--trend-down)',

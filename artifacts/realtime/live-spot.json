@@ -1,0 +1,98 @@
+{
+  "market": "spot",
+  "symbol": "BTCUSDT",
+  "durationMs": 15000,
+  "subscribedSymbols": 502,
+  "observedTradingSymbols": 234,
+  "clockCalibration": {
+    "roundTripMs": 122,
+    "clockOffsetMs": 1967,
+    "note": "Event age is approximate, not a guaranteed end-to-end latency."
+  },
+  "received": {
+    "trades": 1597,
+    "klines": 7,
+    "tickers": 15
+  },
+  "intervalMs": {
+    "trades": {
+      "count": 1596,
+      "mean": 9.303884711779448,
+      "p95": 33,
+      "max": 74
+    },
+    "klines": {
+      "count": 6,
+      "mean": 2001.1666666666667,
+      "p95": 2004,
+      "max": 2010
+    },
+    "ticker": {
+      "count": 14,
+      "mean": 999.9285714285714,
+      "p95": 1001,
+      "max": 1002
+    }
+  },
+  "approximateTradeEventAgeMs": {
+    "count": 1597,
+    "mean": 56.704445835942394,
+    "p95": 58,
+    "max": 76
+  },
+  "detectorProcessingMs": {
+    "count": 4920,
+    "mean": 0.02241184959348676,
+    "p95": 0.053699999998571,
+    "max": 15.555299999999988
+  },
+  "alerts": 6,
+  "candles": {
+    "initialTime": 1791363600,
+    "finalTime": 1791363600,
+    "crossedMinute": false,
+    "highPreserved": true
+  },
+  "health": [
+    {
+      "feed": "trades",
+      "status": "connecting",
+      "elapsedMs": 1
+    },
+    {
+      "feed": "ticker",
+      "status": "connecting",
+      "elapsedMs": 5
+    },
+    {
+      "feed": "klines",
+      "status": "connecting",
+      "elapsedMs": 8
+    },
+    {
+      "feed": "trades",
+      "status": "stale",
+      "elapsedMs": 147
+    },
+    {
+      "feed": "ticker",
+      "status": "stale",
+      "elapsedMs": 179
+    },
+    {
+      "feed": "trades",
+      "status": "connected",
+      "elapsedMs": 341
+    },
+    {
+      "feed": "ticker",
+      "status": "connected",
+      "elapsedMs": 931
+    },
+    {
+      "feed": "klines",
+      "status": "connected",
+      "elapsedMs": 1289
+    }
+  ]
+}

@@ -1,21 +1,25 @@
-import { lazy, Suspense, useState, useEffect, useRef, useMemo } from 'react';
-import { fetchSupportedCoins, fetchTickers, connectTickerWebSocket, connectAggregateTradeWebSocket, fetchFundingRates, FALLBACK_COINS } from './services/binance';
+import { lazy, Suspense, useState, useEffect, useMemo } from 'react';
+import { fetchSupportedCoins, fetchTickers, fetchFundingRates, FALLBACK_COINS } from './services/binance';
 import type { TickerData, CoinMetadata, MarketType } from './services/binance';
 import { formatCryptoPrice } from './services/utils';
-import CryptoTable from './components/CryptoTable';
+import AnalysisWorkspace from './components/AnalysisWorkspace';
 import ChartContainer from './components/ChartContainer';
-import MomentumRadar from './components/MomentumRadar';
 import type { PaperTrade, PaperTradeHistory } from './components/Cockpit';
 import TradingModal from './components/TradingModal';
 import MarketAlertCenter from './components/MarketAlertCenter';
 import CoinPicker from './components/CoinPicker';
 import { useMarketAlerts } from './hooks/useMarketAlerts';
-import { LayoutDashboard, Wallet, Clock, Activity, Sun, Moon } from 'lucide-react';
+import { useRealtimeQuotes } from './hooks/useRealtimeQuotes';
+import { useAutoTrading } from './hooks/useAutoTrading';
+import QuoteStatus from './components/QuoteStatus';
+import { paperLimitFillPrice, validatePaperOrder } from './services/orderValidation';
+import { LayoutDashboard, Wallet, Clock, Sun, Moon } from 'lucide-react';
 import './App.css';
 
 const Portfolio = lazy(() => import('./components/Portfolio'));
 const Cockpit = lazy(() => import('./components/Cockpit'));
 const AutoBotLab = lazy(() => import('./components/AutoBotLab'));
+const AutoTrading = lazy(() => import('./components/AutoTrading'));
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<'dashboard' | 'portfolio'>(() => {
@@ -26,11 +30,10 @@ export default function App() {
     const saved = localStorage.getItem('crypto_market_type');
     return (saved === 'spot' || saved === 'futures') ? saved : 'spot';
   });
-  const [viewMode, setViewMode] = useState<'analysis' | 'cockpit' | 'bot'>(() => {
+  const [viewMode, setViewMode] = useState<'analysis' | 'cockpit' | 'bot' | 'auto'>(() => {
     const saved = localStorage.getItem('crypto_view_mode');
-    return (saved === 'analysis' || saved === 'cockpit' || saved === 'bot') ? saved : 'analysis';
+    return (saved === 'analysis' || saved === 'cockpit' || saved === 'bot' || saved === 'auto') ? saved : 'analysis';
   });
-  const [rightSidebarTab, setRightSidebarTab] = useState<'watchlist' | 'radar'>('watchlist');
 
   // Persist tab selections
   useEffect(() => {
@@ -47,19 +50,16 @@ export default function App() {
   
   const [coins, setCoins] = useState<CoinMetadata[]>([]);
   const [selectedSymbol, setSelectedSymbol] = useState<string>('BTCUSDT');
+  const [selectedFollowPlanId, setSelectedFollowPlanId] = useState<string | null>(null);
+  const [hiddenFollowPlanId, setHiddenFollowPlanId] = useState<string | null>(null);
   const [tickers, setTickers] = useState<Record<string, TickerData>>({});
   const [fundingRates, setFundingRates] = useState<Record<string, number>>({});
-  const [subscribedSymbols, setSubscribedSymbols] = useState<string[]>([]);
   
   const [watchlist, setWatchlist] = useState<string[]>([]);
   const [paperTrades, setPaperTrades] = useState<PaperTrade[]>([]);
   const [paperBalance, setPaperBalance] = useState<number>(100000);
   const [paperHistory, setPaperHistory] = useState<PaperTradeHistory[]>([]);
   const [reversalWarnings, setReversalWarnings] = useState<string[]>([]);
-  const wsRef = useRef<any>(null);
-
-  const [wsStatus, setWsStatus] = useState<'connecting' | 'connected' | 'disconnected'>('connecting');
-  const [wsAttempts, setWsAttempts] = useState<number>(0);
 
   const [tradingModal, setTradingModal] = useState<{
     isOpen: boolean;
@@ -77,10 +77,14 @@ export default function App() {
     return saved === 'light' ? 'light' : 'dark';
   });
 
+  const autoTrading = useAutoTrading(marketType);
+  const { registerNotifications, setSignalSettings } = autoTrading;
   const {
     alerts: marketAlerts,
     unreadCount: marketAlertUnreadCount,
     activeToast: activeMarketAlert,
+    followPlans,
+    followEvents,
     notificationPermission,
     settings: marketAlertSettings,
     processTickerBatch,
@@ -90,10 +94,23 @@ export default function App() {
     markAllRead: markMarketAlertsRead,
     clearAlerts: clearMarketAlerts,
     dismissToast: dismissMarketAlert,
-  } = useMarketAlerts(marketType);
+    publishExternalNotification,
+  } = useMarketAlerts(marketType, autoTrading.processFrame);
+  useEffect(() => {
+    registerNotifications(publishExternalNotification);
+    return () => registerNotifications(null);
+  }, [registerNotifications, publishExternalNotification]);
+  useEffect(() => {
+    setSignalSettings({ ...marketAlertSettings });
+  }, [setSignalSettings, marketAlertSettings]);
+  const selectedFollowPlan = followPlans.find(plan => plan.id === selectedFollowPlanId && plan.symbol === selectedSymbol && plan.marketType === marketType)
+    ?? autoTrading.history.flatMap(batch => batch.plans).find(plan => plan.id === selectedFollowPlanId && plan.symbol === selectedSymbol && plan.marketType === marketType)
+    ?? followPlans.find(plan => plan.symbol === selectedSymbol && plan.marketType === marketType);
+  const visibleFollowPlan = selectedFollowPlan?.id !== hiddenFollowPlanId ? selectedFollowPlan : undefined;
 
   // Merge and deduplicate subscription symbols
-  const subSymbolsKey = Array.from(new Set([selectedSymbol, ...watchlist, ...subscribedSymbols])).join(',');
+  const subSymbolsKey = Array.from(new Set([...coins.map(coin => coin.symbol), ...autoTrading.universeSymbols, selectedSymbol, ...watchlist])).sort().join(',');
+  const liveQuotes = useRealtimeQuotes(marketType, subSymbolsKey, selectedSymbol, setTickers, processTickerBatch, processAggregateTrade, autoTrading.onTradeStatus);
 
   // Apply theme class to document body
   useEffect(() => {
@@ -132,7 +149,6 @@ export default function App() {
     setCoins([]);
     setTickers({});
     setFundingRates({});
-    setSubscribedSymbols([]);
 
     // 1. Fetch dynamic coins list from exchange info
     fetchSupportedCoins(marketType)
@@ -154,14 +170,6 @@ export default function App() {
         });
         setTickers((prev) => ({ ...initialTickers, ...prev }));
 
-        // Determine top 60 symbols by volume to subscribe
-        const sortedSymbols = tickerData
-          .sort((a, b) => b.quoteVolume - a.quoteVolume)
-          .map(t => t.symbol)
-          .slice(0, 60);
-
-        setSubscribedSymbols(sortedSymbols);
-
         // 3. Fetch Funding Rates (Futures only)
         if (marketType === 'futures') {
           return fetchFundingRates();
@@ -176,7 +184,6 @@ export default function App() {
         console.error(`Failed to load initial Binance ${marketType} data:`, err);
         if (active) {
           setCoins(FALLBACK_COINS);
-          setSubscribedSymbols(FALLBACK_COINS.map(c => c.symbol));
         }
       });
 
@@ -185,56 +192,6 @@ export default function App() {
 
   useEffect(() => {
     let active = true;
-
-    // 4. Establish WebSocket connection (streams all symbols via !ticker@arr or combined streams)
-    const currentSubSymbols = subSymbolsKey.split(',').filter(Boolean);
-    const ws = connectTickerWebSocket(
-      marketType,
-      (batch) => {
-        if (!active) return;
-
-        processTickerBatch(batch);
-        
-        setTickers((prev) => {
-          const next = { ...prev };
-          batch.forEach((tick) => {
-            if (next[tick.symbol]) {
-              next[tick.symbol] = {
-                ...next[tick.symbol],
-                ...tick,
-              };
-            } else {
-              next[tick.symbol] = {
-                symbol: tick.symbol,
-                price: tick.price ?? 0,
-                priceChange: 0,
-                priceChangePercent: tick.priceChangePercent ?? 0,
-                high: tick.high ?? tick.price ?? 0,
-                low: tick.low ?? tick.price ?? 0,
-                volume: tick.volume ?? 0,
-                quoteVolume: tick.quoteVolume ?? 0,
-                open: tick.price ?? 0,
-              };
-            }
-          });
-          return next;
-        });
-      },
-      (status, attempts) => {
-        if (!active) return;
-        setWsStatus(status);
-        setWsAttempts(attempts);
-      },
-      currentSubSymbols
-    );
-
-    wsRef.current = ws;
-
-    const aggregateTradeWs = connectAggregateTradeWebSocket(
-      marketType,
-      currentSubSymbols,
-      processAggregateTrade
-    );
 
     // Set up interval to poll funding rates every 30 seconds (Futures only)
     let ratesInterval: any = null;
@@ -250,44 +207,11 @@ export default function App() {
 
     return () => {
       active = false;
-      ws.close();
-      aggregateTradeWs.close();
       if (ratesInterval) {
         clearInterval(ratesInterval);
       }
     };
-  }, [marketType, subSymbolsKey, processTickerBatch, processAggregateTrade]);
-
-  // Keep exchange snapshots intact while the live stream is unavailable.
-  useEffect(() => {
-    let pollingInterval: any = null;
-
-    // 1. Fallback REST Polling: If disconnected, poll actual prices from REST API every 10s
-    if (wsStatus === 'disconnected') {
-      console.log('WebSocket offline: Starting fallback REST polling every 10s...');
-      pollingInterval = setInterval(() => {
-        fetchTickers(marketType)
-          .then((tickerData) => {
-            if (!tickerData) return;
-            setTickers((prev) => {
-              const next = { ...prev };
-              tickerData.forEach((t) => {
-                next[t.symbol] = {
-                  ...(next[t.symbol] || {}),
-                  ...t,
-                };
-              });
-              return next;
-            });
-          })
-          .catch((err) => console.warn('Fallback REST polling failed:', err));
-      }, 10000);
-    }
-
-    return () => {
-      if (pollingInterval) clearInterval(pollingInterval);
-    };
-  }, [wsStatus, marketType]);
+  }, [marketType]);
 
   const handleToggleWatchlist = (symbol: string) => {
     const key = `crypto_watchlist_${marketType}`;
@@ -317,15 +241,9 @@ export default function App() {
 
       if (trade.status === 'PENDING') {
         // Check if LIMIT order is filled
-        let isFilled = false;
-        if (trade.side === 'LONG' && currentPrice <= (trade.limitPrice || trade.entryPrice)) {
-          isFilled = true;
-        } else if (trade.side === 'SHORT' && currentPrice >= (trade.limitPrice || trade.entryPrice)) {
-          isFilled = true;
-        }
+        const filledPrice = paperLimitFillPrice(trade.side, trade.limitPrice ?? trade.entryPrice, currentPrice);
 
-        if (isFilled) {
-          const filledPrice = trade.limitPrice || currentPrice;
+        if (filledPrice !== null) {
           const liq = trade.side === 'LONG'
             ? filledPrice * (1 - 1 / trade.leverage + 0.004)
             : filledPrice * (1 + 1 / trade.leverage - 0.004);
@@ -509,19 +427,30 @@ export default function App() {
     takeProfit?: number,
     stopLoss?: number
   ) => {
+    const livePrice = tickers[symbol]?.price ?? 0;
+    const orderError = validatePaperOrder(side, type, price, livePrice, takeProfit, stopLoss);
+    if (orderError) {
+      alert(orderError);
+      return false;
+    }
+    if (![size, leverage].every(Number.isFinite) || size <= 0 || leverage < 1 || leverage > 125) {
+      alert('倉位大小或槓桿無效。');
+      return false;
+    }
+    const entryPrice = type === 'MARKET' ? livePrice : price;
     const margin = size / leverage;
     if (marketType === 'spot' && (side !== 'LONG' || leverage !== 1)) {
       alert('現貨模擬僅支援買入與 1 倍資金。');
-      return;
+      return false;
     }
     if (paperBalance < margin) {
       alert('可用餘額不足以支付此部位保證金！');
-      return;
+      return false;
     }
 
     const liq = marketType === 'spot' ? undefined : side === 'LONG'
-      ? price * (1 - 1 / leverage + 0.004)
-      : price * (1 + 1 / leverage - 0.004);
+      ? entryPrice * (1 - 1 / leverage + 0.004)
+      : entryPrice * (1 + 1 / leverage - 0.004);
 
     const newTrade: PaperTrade = {
       id: Date.now().toString(),
@@ -530,9 +459,9 @@ export default function App() {
       type,
       status: type === 'MARKET' ? 'OPEN' : 'PENDING',
       leverage,
-      entryPrice: price,
-      limitPrice: type === 'LIMIT' ? price : undefined,
-      currentPrice: price,
+      entryPrice,
+      limitPrice: type === 'LIMIT' ? entryPrice : undefined,
+      currentPrice: livePrice,
       size,
       takeProfit: takeProfit || undefined,
       stopLoss: stopLoss || undefined,
@@ -553,10 +482,11 @@ export default function App() {
     localStorage.setItem(balanceKey, updatedBalance.toString());
 
     if (type === 'MARKET') {
-      alert(`成功市價開倉！\n代幣: ${symbol.replace('USDT', '')}\n方向: ${side === 'LONG' ? '做多 LONG' : '做空 SHORT'}\n價格: $${formatCryptoPrice(price)}\n槓桿: ${leverage}x\n名義價值: $${size}\n占用保證金: $${margin.toFixed(2)} USDT`);
+      alert(`成功市價開倉！\n代幣: ${symbol.replace('USDT', '')}\n方向: ${side === 'LONG' ? '做多 LONG' : '做空 SHORT'}\n價格: $${formatCryptoPrice(entryPrice)}\n槓桿: ${leverage}x\n名義價值: $${size}\n占用保證金: $${margin.toFixed(2)} USDT`);
     } else {
       alert(`限價委託已送出！\n代幣: ${symbol.replace('USDT', '')}\n方向: ${side === 'LONG' ? '做多 LONG' : '做空 SHORT'}\n委託限價: $${formatCryptoPrice(price)}\n槓桿: ${leverage}x\n名義價值: $${size}\n凍結保證金: $${margin.toFixed(2)} USDT`);
     }
+    return true;
   };
 
   const handleCancelPendingOrder = (id: string) => {
@@ -699,12 +629,6 @@ export default function App() {
   const selectedChange = selectedTicker?.priceChangePercent ?? 0;
   const selectedIsUp = selectedChange >= 0;
 
-  const getHighLowSpreadPercent = () => {
-    if (!selectedTicker) return 0;
-    const spread = selectedTicker.high - selectedTicker.low;
-    if (spread === 0) return 50;
-    return ((selectedTicker.price - selectedTicker.low) / spread) * 100;
-  };
 
   // Select banner coins
   const bannerSymbols = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT'];
@@ -731,9 +655,10 @@ export default function App() {
   }
 
   const coinSymbol = selectedCard.symbol.replace('USDT', '');
+  const isAnalysis = activeTab === 'dashboard' && viewMode === 'analysis';
 
   return (
-    <div className="app-container">
+    <div className={`app-container ${isAnalysis ? 'analysis-mode' : ''}`}>
       {/* Sidebar Section */}
       <aside className="sidebar">
         <div>
@@ -746,6 +671,8 @@ export default function App() {
             <button
               type="button"
               aria-current={activeTab === 'dashboard' ? 'page' : undefined}
+              title="即時行情儀表板"
+              aria-label="即時行情儀表板"
               className={`nav-item ${activeTab === 'dashboard' ? 'active' : ''}`}
               onClick={() => setActiveTab('dashboard')}
             >
@@ -756,6 +683,8 @@ export default function App() {
             <button
               type="button"
               aria-current={activeTab === 'portfolio' ? 'page' : undefined}
+              title="虛擬資產帳戶"
+              aria-label="虛擬資產帳戶"
               className={`nav-item ${activeTab === 'portfolio' ? 'active' : ''}`}
               onClick={() => setActiveTab('portfolio')}
             >
@@ -790,47 +719,28 @@ export default function App() {
                 alerts={marketAlerts}
                 unreadCount={marketAlertUnreadCount}
                 activeToast={activeMarketAlert}
+                followPlans={followPlans}
+                followEvents={followEvents}
                 notificationPermission={notificationPermission}
                 settings={marketAlertSettings}
+                settingsLocked={autoTrading.marketLocked}
+                tickers={tickers}
+                monitoredCount={coins.length}
                 onEnableDesktopAlerts={enableDesktopAlerts}
-                onSettingsChange={setMarketAlertSettings}
+                onSettingsChange={settings => { if (!autoTrading.marketLocked) setMarketAlertSettings(settings); }}
                 onMarkAllRead={markMarketAlertsRead}
                 onClearAlerts={clearMarketAlerts}
                 onDismissToast={dismissMarketAlert}
-                onSelectSymbol={(symbol) => {
+                onSelectSymbol={(symbol, planId) => {
                   setActiveTab('dashboard');
                   setSelectedSymbol(symbol);
                   setViewMode('analysis');
+                  setSelectedFollowPlanId(planId ?? null);
+                  setHiddenFollowPlanId(null);
                 }}
               />
 
-              <div className={`ws-status-badge ${wsStatus}`} title={
-                wsStatus === 'connected'
-                  ? '已連線至交易所即時報價'
-                  : wsStatus === 'connecting'
-                  ? `正在嘗試連線中... (第 ${wsAttempts} 次嘗試)`
-                  : '即時連線中斷，每 10 秒向交易所取得報價；顯示最近一次真實報價'
-              }>
-                <span className="ws-status-dot"></span>
-                <span className="ws-status-text">
-                  {wsStatus === 'connected' && '已連線'}
-                  {wsStatus === 'connecting' && `連線中 (${wsAttempts})`}
-                  {wsStatus === 'disconnected' && '報價輪詢中'}
-                </span>
-                {wsStatus !== 'connected' && (
-                  <button
-                    className="ws-reconnect-btn"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      if (wsRef.current) {
-                        wsRef.current.reconnect();
-                      }
-                    }}
-                  >
-                    重連
-                  </button>
-                )}
-              </div>
+              <QuoteStatus ticker={selectedTicker} tickerStatus={liveQuotes.tickerStatus} tradeStatus={liveQuotes.tradeStatus} onReconnect={liveQuotes.reconnect} />
 
               <button
                 className="utility-icon-button"
@@ -862,22 +772,27 @@ export default function App() {
                 >
                   策略回測
                 </button>
+                <button className={viewMode === 'auto' ? 'active' : ''} onClick={() => setViewMode('auto')}>自動交易</button>
               </div>
             )}
 
             <div className="segmented-control">
               <button
+                disabled={autoTrading.marketLocked && marketType !== 'spot'}
+                title={autoTrading.marketLocked ? '請先結束自動交易評估再切換市場' : undefined}
                 className={marketType === 'spot' ? 'active' : ''}
                 onClick={() => {
-                  if (marketType !== 'spot') setMarketType('spot');
+                  if (!autoTrading.marketLocked && marketType !== 'spot') setMarketType('spot');
                 }}
               >
                 現貨
               </button>
               <button
+                disabled={autoTrading.marketLocked && marketType !== 'futures'}
+                title={autoTrading.marketLocked ? '請先結束自動交易評估再切換市場' : undefined}
                 className={marketType === 'futures' ? 'active' : ''}
                 onClick={() => {
-                  if (marketType !== 'futures') setMarketType('futures');
+                  if (!autoTrading.marketLocked && marketType !== 'futures') setMarketType('futures');
                 }}
               >
                 合約
@@ -887,7 +802,7 @@ export default function App() {
         </div>
 
         {/* Top Scrolling Banner */}
-        <div className="market-banner">
+        {!isAnalysis && viewMode !== 'auto' && <div className="market-banner">
           {bannerCoins.map((coin) => {
             const ticker = tickers[coin.symbol];
             if (!ticker) return null;
@@ -915,10 +830,10 @@ export default function App() {
               </div>
             );
           })}
-        </div>
+        </div>}
 
         {/* Global Trend Reversal Warning Banner */}
-        {reversalWarnings.length > 0 && (
+        {viewMode !== 'auto' && reversalWarnings.length > 0 && (
           <div className="reversal-warning-banner">
             <div className="reversal-warning-header">
               <span className="warning-pulse-icon">⚠️</span>
@@ -952,7 +867,7 @@ export default function App() {
           </div>
         )}
 
-        {activeTab === 'dashboard' && (
+        {activeTab === 'dashboard' && viewMode !== 'auto' && (
           <section className="focus-strip">
             <div className="focus-asset">
               {selectedCard.logo ? (
@@ -996,175 +911,45 @@ export default function App() {
         {/* Dashboard View */}
         {activeTab === 'dashboard' && (
           viewMode === 'analysis' ? (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
-              {/* Candlestick Chart */}
+            <AnalysisWorkspace
+              coins={coins}
+              tickers={tickers}
+              selectedSymbol={selectedSymbol}
+              onSelectSymbol={setSelectedSymbol}
+              watchlist={watchlist}
+              onToggleWatchlist={handleToggleWatchlist}
+              marketType={marketType}
+              fundingRates={fundingRates}
+            >
               <ChartContainer
                 symbol={selectedSymbol}
                 coinName={selectedCard.name}
                 logo={selectedCard.logo}
                 currentPrice={selectedTicker ? selectedTicker.price : null}
+                liveTicker={selectedTicker}
                 marketType={marketType}
                 alerts={selectedMarketAlerts}
+                followPlan={visibleFollowPlan}
+                onHideFollowPlan={() => setHiddenFollowPlanId(visibleFollowPlan?.id ?? null)}
                 onOpenPaperTrade={handleTriggerOpenTradeModal}
                 onQuickFollowTrade={marketType === 'futures' ? handleQuickFollowTrade : undefined}
                 theme={theme}
               />
-
-              {/* Sub-grid (Table on Left, Tools on Right) */}
-              <div className="dashboard-grid">
-                <CryptoTable
-                  coins={coins}
-                  tickers={tickers}
-                  selectedSymbol={selectedSymbol}
-                  onSelectSymbol={setSelectedSymbol}
-                  watchlist={watchlist}
-                  onToggleWatchlist={handleToggleWatchlist}
-                  marketType={marketType}
-                  fundingRates={fundingRates}
-                />
-
-                <div className="sidebar-panel">
-                  {/* Watchlist & Momentum Radar Tab Card */}
-                  <div className="card">
-                    <h2 className="card-title" style={{ borderBottom: '1px solid var(--border-glass)', paddingBottom: '12px', marginBottom: '16px' }}>
-                      <div style={{ display: 'flex', gap: '16px' }}>
-                        <span
-                          onClick={() => setRightSidebarTab('watchlist')}
-                          style={{
-                            cursor: 'pointer',
-                            color: rightSidebarTab === 'watchlist' ? 'var(--text-primary)' : 'var(--text-muted)',
-                            borderBottom: rightSidebarTab === 'watchlist' ? '2px solid var(--accent-primary)' : '2px solid transparent',
-                            paddingBottom: '6px',
-                            transition: 'all 0.2s',
-                            fontSize: '15px'
-                          }}
-                        >
-                          自訂關注清單
-                        </span>
-                        <span
-                          onClick={() => setRightSidebarTab('radar')}
-                          style={{
-                            cursor: 'pointer',
-                            color: rightSidebarTab === 'radar' ? 'var(--text-primary)' : 'var(--text-muted)',
-                            borderBottom: rightSidebarTab === 'radar' ? '2px solid var(--accent-primary)' : '2px solid transparent',
-                            paddingBottom: '6px',
-                            transition: 'all 0.2s',
-                            fontSize: '15px'
-                          }}
-                        >
-                          動能排行
-                        </span>
-                      </div>
-                    </h2>
-                    <div>
-                      {rightSidebarTab === 'watchlist' ? (
-                        watchlist.length === 0 ? (
-                          <div className="empty-state" style={{ padding: '20px 0' }}>
-                            點選行情表旁的星星即可加入關注清單。
-                          </div>
-                        ) : (
-                          watchlist.map((sym) => {
-                            const coin = coins.find(c => c.symbol === sym);
-                            const ticker = tickers[sym];
-                            if (!coin || !ticker) return null;
-                            const isUp = ticker.priceChangePercent >= 0;
-
-                            return (
-                              <div
-                                key={sym}
-                                className="watchlist-item"
-                                style={{ cursor: 'pointer' }}
-                                onClick={() => setSelectedSymbol(sym)}
-                              >
-                                <div className="coin-info">
-                                  {coin.logo ? (
-                                    <img src={coin.logo} alt={coin.name} style={{ width: '24px', height: '24px', borderRadius: '50%' }} />
-                                  ) : (
-                                    <div style={{
-                                      width: '24px',
-                                      height: '24px',
-                                      borderRadius: '50%',
-                                      background: 'var(--accent-gradient)',
-                                      display: 'flex',
-                                      alignItems: 'center',
-                                      justifyContent: 'center',
-                                      fontSize: '9px',
-                                      fontWeight: 700
-                                    }}>
-                                      {coin.baseAsset.substring(0, 2)}
-                                    </div>
-                                  )}
-                                  <div>
-                                    <span className="coin-symbol" style={{ fontSize: '13px' }}>{coin.baseAsset}</span>
-                                  </div>
-                                </div>
-                                <div style={{ textAlign: 'right' }}>
-                                  <div style={{ fontSize: '13px', fontWeight: 600, fontFamily: 'var(--font-display)' }}>
-                                    ${formatCryptoPrice(ticker.price)}
-                                  </div>
-                                  <div className={isUp ? 'trend-up' : 'trend-down'} style={{ fontSize: '11px', marginTop: '2px', fontWeight: 600 }}>
-                                    {isUp ? '+' : ''}{ticker.priceChangePercent.toFixed(2)}%
-                                  </div>
-                                </div>
-                              </div>
-                            );
-                          })
-                        )
-                      ) : (
-                        <MomentumRadar
-                          coins={coins}
-                          tickers={tickers}
-                          onSelectSymbol={setSelectedSymbol}
-                          selectedSymbol={selectedSymbol}
-                        />
-                      )}
-                    </div>
-                  </div>
-
-                  {/* Analysis/Gauge Card */}
-                  <div className="card">
-                    <h2 className="card-title" style={{ gap: '8px' }}>
-                      <Activity size={18} color="var(--accent-secondary)" /> 24h 價格區間指標 ({coinSymbol})
-                    </h2>
-                    {selectedTicker ? (
-                      <div>
-                        <div style={{ display: 'flex', justifyItems: 'center', justifyContent: 'space-between', fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '8px' }}>
-                          <span>24h 最低價</span>
-                          <span>最新價格</span>
-                          <span>24h 最高價</span>
-                        </div>
-                        <div style={{ display: 'flex', justifyItems: 'center', justifyContent: 'space-between', fontWeight: 600, fontSize: '13px', marginBottom: '14px', fontFamily: 'var(--font-display)' }}>
-                          <span>${formatCryptoPrice(selectedTicker.low)}</span>
-                          <span style={{ color: 'var(--accent-secondary)' }}>${formatCryptoPrice(selectedTicker.price)}</span>
-                          <span>${formatCryptoPrice(selectedTicker.high)}</span>
-                        </div>
-
-                        {/* Progress Bar Gauge */}
-                        <div style={{ width: '100%', height: '8px', background: 'rgba(255, 255, 255, 0.05)', borderRadius: '4px', overflow: 'hidden', position: 'relative', marginBottom: '20px' }}>
-                          <div style={{
-                            height: '100%',
-                            width: `${getHighLowSpreadPercent()}%`,
-                            background: 'var(--accent-gradient)',
-                            borderRadius: '4px',
-                            transition: 'width 0.3s ease-out'
-                          }} />
-                        </div>
-
-                        {/* Context Information */}
-                        <div style={{ fontSize: '12px', color: 'var(--text-secondary)', lineHeight: '1.6' }}>
-                          目前的幣價處於 24 小時高低點的 <strong>{getHighLowSpreadPercent().toFixed(1)}%</strong> 位置。
-                          {getHighLowSpreadPercent() > 80 && ' 目前價格接近今日高點，多頭力道強勁，請留意超買與回檔風險。'}
-                          {getHighLowSpreadPercent() < 20 && ' 目前價格接近今日低點，空頭占優勢，可觀察支撐力道是否浮現。'}
-                          {getHighLowSpreadPercent() >= 20 && getHighLowSpreadPercent() <= 80 && ' 目前價格處於區間震盪整理，市場走向相對中立。'}
-                        </div>
-                      </div>
-                    ) : (
-                      <div className="empty-state">連線中...</div>
-                    )}
-                  </div>
-                </div>
-              </div>
-            </div>
+            </AnalysisWorkspace>
+          ) : viewMode === 'auto' ? (
+            <AutoTrading snapshot={autoTrading.snapshot} history={autoTrading.history}
+              storageError={autoTrading.storageError} ready={autoTrading.ready} statusMessage={autoTrading.statusMessage}
+              onStart={autoTrading.start} onPause={autoTrading.pause} onResume={autoTrading.resume}
+              onDrain={autoTrading.drain} onCloseAll={autoTrading.closeAll} theme={theme}
+              onSelectSymbol={(symbol, planId) => {
+                const plan = autoTrading.history.flatMap(batch => batch.plans).find(item => item.id === planId);
+                if (plan && plan.marketType !== marketType) {
+                  if (autoTrading.marketLocked) return;
+                  setMarketType(plan.marketType);
+                }
+                setSelectedSymbol(symbol); setSelectedFollowPlanId(planId ?? null);
+                setViewMode('analysis'); setHiddenFollowPlanId(null);
+              }} />
           ) : viewMode === 'bot' ? (
             <AutoBotLab
               symbol={selectedSymbol}
@@ -1201,8 +986,9 @@ export default function App() {
       </main>
 
       {/* Trading Modal Overlay */}
-      <TradingModal
+      {tradingModal.isOpen && <TradingModal
         marketType={marketType}
+        marketPrice={tickers[tradingModal.symbol]?.price ?? null}
         isOpen={tradingModal.isOpen}
         symbol={tradingModal.symbol}
         suggestedSide={tradingModal.suggestedSide}
@@ -1214,7 +1000,7 @@ export default function App() {
         availableBalance={paperBalance}
         onClose={() => setTradingModal(prev => ({ ...prev, isOpen: false }))}
         onSubmit={handleOpenPaperTrade}
-      />
+      />}
     </div>
   );
 }

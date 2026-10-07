@@ -1,20 +1,28 @@
-import { useEffect, useRef, useState } from 'react';
-import { createChart, CandlestickSeries, createSeriesMarkers, LineSeries, LineStyle } from 'lightweight-charts';
-import type { CandlestickData, LineData, SeriesMarker } from 'lightweight-charts';
-import { fetchKlines, fetchOpenInterest } from '../services/binance';
-import type { KlineData, MarketType } from '../services/binance';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { createChart, CandlestickSeries, createSeriesMarkers, LineSeries, LineStyle, ColorType } from 'lightweight-charts';
+import type { IChartApi, IPriceLine, ISeriesApi, ISeriesMarkersPluginApi, Time, UTCTimestamp, CandlestickData, LineData, SeriesMarker, AutoscaleInfo } from 'lightweight-charts';
+import { connectKlineWebSocket, fetchKlines, fetchOpenInterest } from '../services/binance';
+import type { KlineData, MarketType, TickerData } from '../services/binance';
+import { applyTradeToKlines, upsertKline } from '../services/liveMarket';
+import type { StreamStatus } from '../services/marketStream';
 import type { MarketAlert } from '../services/marketAlerts';
 import { deriveSuggestedTradeLevels, formatLevelText } from '../services/tradeLevels';
-import { formatCryptoPrice } from '../services/utils';
+import { formatCryptoPrice, getPricePrecision } from '../services/utils';
 import SignalAdvisor from './SignalAdvisor';
+import FollowPlanSummary from './FollowPlanSummary';
+import type { FollowPlan } from '../services/followPlans';
+import { followPlanLines } from '../services/followPlanLines';
 
 interface ChartContainerProps {
   symbol: string;
   coinName: string;
   logo: string;
   currentPrice: number | null;
+  liveTicker?: TickerData;
   marketType: MarketType;
   alerts?: MarketAlert[];
+  followPlan?: FollowPlan;
+  onHideFollowPlan?: () => void;
   onOpenPaperTrade?: (
     symbol: string,
     side?: 'LONG' | 'SHORT',
@@ -47,7 +55,7 @@ function calculateSMA(data: KlineData[], period: number): LineData[] {
       sum += data[i - j].close;
     }
     result.push({
-      time: data[i].time as any,
+      time: data[i].time as UTCTimestamp,
       value: sum / period,
     });
   }
@@ -85,7 +93,7 @@ function calculateEMASeries(data: KlineData[], period: number): { time: number; 
 function calculateEMA(data: KlineData[], period: number): LineData[] {
   const series = calculateEMASeries(data, period);
   return series.map(s => ({
-    time: s.time as any,
+    time: s.time as UTCTimestamp,
     value: s.value
   }));
 }
@@ -141,7 +149,7 @@ function calculateMACD(data: KlineData[], fastPeriod = 12, slowPeriod = 26, sign
     const fastVal = fastEma.find(e => e.time === data[i].time)?.value || 0;
     const slowVal = slowEma.find(e => e.time === data[i].time)?.value || 0;
     macdLines.push({
-      time: data[i].time as any,
+      time: data[i].time as UTCTimestamp,
       value: fastVal - slowVal
     });
   }
@@ -156,7 +164,7 @@ function calculateMACD(data: KlineData[], fastPeriod = 12, slowPeriod = 26, sign
   }
   let prevSignal = sum / signalPeriod;
   signalLines.push({
-    time: macdLines[signalPeriod - 1].time as any,
+      time: macdLines[signalPeriod - 1].time,
     value: prevSignal
   });
   
@@ -164,7 +172,7 @@ function calculateMACD(data: KlineData[], fastPeriod = 12, slowPeriod = 26, sign
   for (let i = signalPeriod; i < macdLines.length; i++) {
     const currentSignal = (macdLines[i].value - prevSignal) * multiplier + prevSignal;
     signalLines.push({
-      time: macdLines[i].time as any,
+      time: macdLines[i].time,
       value: currentSignal
     });
     prevSignal = currentSignal;
@@ -176,7 +184,7 @@ function calculateMACD(data: KlineData[], fastPeriod = 12, slowPeriod = 26, sign
     const macdVal = macdLines[i].value;
     const sigVal = signalLines.find(s => s.time === macdLines[i].time)?.value || 0;
     histograms.push({
-      time: macdLines[i].time as any,
+      time: macdLines[i].time,
       value: macdVal - sigVal
     });
   }
@@ -216,59 +224,100 @@ function calculateRSI(data: KlineData[], period: number = 14): number | null {
   return 100 - 100 / (1 + rs);
 }
 
-export default function ChartContainer({ symbol, coinName, logo, currentPrice, marketType, alerts = [], onOpenPaperTrade, onQuickFollowTrade, theme }: ChartContainerProps) {
+function indicatorBundle(klines: KlineData[]) {
+  const sma = calculateSMA(klines, 20);
+  const ema = calculateEMA(klines, 50);
+  const bb = calculateBollingerBands(klines);
+  const macd = calculateMACD(klines);
+  const latestBb = bb.at(-1);
+  const latestMacd = macd.macdLines.at(-1);
+  const latestSignal = macd.signalLines.at(-1);
+  return {
+    lines: [sma, ema, bb.map(item => ({ time: item.time as UTCTimestamp, value: item.upper })), bb.map(item => ({ time: item.time as UTCTimestamp, value: item.lower }))],
+    indicators: {
+      rsi: calculateRSI(klines), sma20: sma.at(-1)?.value ?? null, ema50: ema.at(-1)?.value ?? null,
+      bb: latestBb ? { middle: latestBb.middle, upper: latestBb.upper, lower: latestBb.lower } : null,
+      macd: latestMacd && latestSignal ? { macd: latestMacd.value, signal: latestSignal.value, histogram: macd.histograms.at(-1)?.value ?? 0 } : null,
+    },
+  };
+}
+
+export default function ChartContainer({ symbol, coinName, logo, currentPrice, liveTicker, marketType, alerts = [], followPlan, onHideFollowPlan, onOpenPaperTrade, onQuickFollowTrade, theme }: ChartContainerProps) {
   const chartContainerRef = useRef<HTMLDivElement>(null);
-  const chartRef = useRef<any>(null);
-  const candlestickSeriesRef = useRef<any>(null);
+  const chartRef = useRef<IChartApi | null>(null);
+  const candlestickSeriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
+  const lineSeriesRef = useRef<ISeriesApi<'Line'>[]>([]);
+  const priceLinesRef = useRef<IPriceLine[]>([]);
+  const markersRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
+  const firstDataRef = useRef(true);
+  const liveTickerRef = useRef(liveTicker);
+  useEffect(() => { liveTickerRef.current = liveTicker; }, [liveTicker]);
   
   const [timeframe, setTimeframe] = useState<string>('1h');
   const [klines, setKlines] = useState<KlineData[]>([]);
+  const [loadedKey, setLoadedKey] = useState('');
+  const chartKey = `${marketType}:${symbol}:${timeframe}`;
+  const isCurrentData = loadedKey === chartKey;
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
   const [retry, setRetry] = useState(0);
-  const [oiQty, setOiQty] = useState<number | null>(null);
-  
-  const [indicators, setIndicators] = useState<{
-    rsi: number | null;
-    sma20: number | null;
-    ema50: number | null;
-    bb: { middle: number; upper: number; lower: number } | null;
-    macd: { macd: number; signal: number; histogram: number } | null;
-  }>({ rsi: null, sma20: null, ema50: null, bb: null, macd: null });
+  const [oiQty, setOiQty] = useState<{ key: string; quantity: number | null } | null>(null);
+  const [streamStatus, setStreamStatus] = useState<StreamStatus>('connecting');
+  const bundle = useMemo(() => indicatorBundle(klines), [klines]);
+  const indicators = bundle.indicators;
 
   // Load Klines Data
   useEffect(() => {
     let active = true;
-    setLoading(true);
-    setError(null);
-    setKlines([]);
-    setIndicators({ rsi: null, sma20: null, ema50: null, bb: null, macd: null });
-    
-    fetchKlines(symbol, timeframe, 200, marketType)
-      .then((data) => {
+    let fetching = false;
+    let ready = false;
+    let health: StreamStatus = 'connecting';
+    const buffer = new Map<number, KlineData>();
+    const refresh = () => {
+      if (fetching || !active) return;
+      fetching = true;
+      void fetchKlines(symbol, timeframe, 200, marketType).then(data => {
         if (!active) return;
-        setKlines(data);
+        let merged = data;
+        for (const candle of [...buffer.values()].sort((a, b) => a.time - b.time)) {
+          if (candle.time >= (data[0]?.time ?? 0)) merged = upsertKline(merged, candle);
+        }
+        const quote = liveTickerRef.current;
+        if (quote?.symbol === symbol && quote.priceSource === 'trade' && quote.priceTimestamp) merged = applyTradeToKlines(merged, quote.price, quote.priceTimestamp, timeframe, quote.tradeId);
+        ready = true;
+        setKlines(merged);
+        setLoadedKey(chartKey);
         setLoading(false);
-      })
-      .catch((err) => {
-        console.error('Failed to load chart data:', err);
-        if (active) { setLoading(false); setError('無法取得 K 線，請重新載入。'); }
-      });
-
+        setError(null);
+      }).catch(err => {
+        console.warn('Failed to load chart data:', err);
+        if (active && !ready) { setLoading(false); setError('無法取得 K 線，請重新載入。'); }
+      }).finally(() => { fetching = false; });
+    };
+    const stream = connectKlineWebSocket(marketType, symbol, timeframe, candle => {
+      if (!active) return;
+      buffer.set(candle.time, candle);
+      if (buffer.size > 500) buffer.delete(buffer.keys().next().value!);
+      if (ready) setKlines(previous => upsertKline(previous, candle));
+    }, status => { if (active) { health = status; setStreamStatus(status); } }, refresh);
+    const start = setTimeout(() => { setLoading(true); setError(null); setKlines([]); refresh(); }, 0);
+    const fallback = setInterval(() => { if (health !== 'connected') refresh(); }, 5_000);
     return () => {
       active = false;
+      stream.close();
+      clearTimeout(start);
+      clearInterval(fallback);
     };
-  }, [symbol, timeframe, marketType, retry]);
+  }, [symbol, timeframe, marketType, retry, chartKey]);
 
   // Load Open Interest Quantity (Futures only)
   useEffect(() => {
     let active = true;
-    setOiQty(null);
 
     if (marketType === 'futures') {
       fetchOpenInterest(symbol, marketType)
         .then((qty) => {
-          if (active) setOiQty(qty);
+          if (active) setOiQty({ key: `${marketType}:${symbol}`, quantity: qty });
         })
         .catch((err) => console.error('Failed to load Open Interest qty:', err));
     }
@@ -278,14 +327,14 @@ export default function ChartContainer({ symbol, coinName, logo, currentPrice, m
     };
   }, [symbol, marketType]);
 
-  // Create / Recreate Chart
+  // Chart instances survive data and alert updates, preserving the user's zoom.
   useEffect(() => {
-    if (!chartContainerRef.current || klines.length === 0) return;
+    if (!chartContainerRef.current) return;
 
     // Create chart instance
     const chart = createChart(chartContainerRef.current, {
       layout: {
-        background: { type: 'solid' as any, color: theme === 'light' ? '#ffffff' : '#191c1c' },
+        background: { type: ColorType.Solid, color: theme === 'light' ? '#ffffff' : '#191c1c' },
         textColor: theme === 'light' ? '#5f6e80' : '#adb5b5',
       },
       grid: {
@@ -301,7 +350,7 @@ export default function ChartContainer({ symbol, coinName, logo, currentPrice, m
         secondsVisible: false,
       },
       width: chartContainerRef.current.clientWidth,
-      height: 400,
+      height: chartContainerRef.current.clientHeight,
     });
 
     // Create Candlestick series using v5 addSeries API
@@ -321,41 +370,17 @@ export default function ChartContainer({ symbol, coinName, logo, currentPrice, m
 
     candlestickSeriesRef.current = candlestickSeries;
 
-    // Convert data to format required by lightweight-charts
-    const chartData: CandlestickData[] = klines.map(k => ({
-      time: k.time as any,
-      open: k.open,
-      high: k.high,
-      low: k.low,
-      close: k.close,
-    }));
-    candlestickSeries.setData(chartData);
-
-    // Calculate Indicators
-    const sma20Data = calculateSMA(klines, 20);
-    const ema50Data = calculateEMA(klines, 50);
-    const latestRsi = calculateRSI(klines, 14);
-
-    const bbData = calculateBollingerBands(klines, 20, 2);
-    const macdData = calculateMACD(klines, 12, 26, 9);
-
-    // Map BB upper and lower bands for line series
-    const bbUpperData: LineData[] = bbData.map(b => ({ time: b.time as any, value: b.upper }));
-    const bbLowerData: LineData[] = bbData.map(b => ({ time: b.time as any, value: b.lower }));
-
     // Render SMA indicator (BB Middle) on chart
     const smaSeries = chart.addSeries(LineSeries, {
       color: '#00e5ff',
       lineWidth: 2,
     });
-    smaSeries.setData(sma20Data);
 
     // Render EMA indicator on chart
     const emaSeries = chart.addSeries(LineSeries, {
       color: '#7c4dff',
       lineWidth: 2,
     });
-    emaSeries.setData(ema50Data);
 
     // Render Bollinger Upper Band (orange dashed line)
     const bbUpperSeries = chart.addSeries(LineSeries, {
@@ -363,7 +388,6 @@ export default function ChartContainer({ symbol, coinName, logo, currentPrice, m
       lineWidth: 1,
       lineStyle: LineStyle.Dashed
     });
-    bbUpperSeries.setData(bbUpperData);
 
     // Render Bollinger Lower Band (purple dashed line)
     const bbLowerSeries = chart.addSeries(LineSeries, {
@@ -371,122 +395,77 @@ export default function ChartContainer({ symbol, coinName, logo, currentPrice, m
       lineWidth: 1,
       lineStyle: LineStyle.Dashed
     });
-    bbLowerSeries.setData(bbLowerData);
-
-    const latestIndicators = {
-      rsi: latestRsi,
-      sma20: sma20Data.length > 0 ? sma20Data[sma20Data.length - 1].value : null,
-      ema50: ema50Data.length > 0 ? ema50Data[ema50Data.length - 1].value : null,
-      bb: bbData.length > 0 ? {
-        middle: bbData[bbData.length - 1].middle,
-        upper: bbData[bbData.length - 1].upper,
-        lower: bbData[bbData.length - 1].lower,
-      } : null,
-      macd: (macdData.macdLines.length > 0 && macdData.signalLines.length > 0) ? {
-        macd: macdData.macdLines[macdData.macdLines.length - 1].value,
-        signal: macdData.signalLines[macdData.signalLines.length - 1].value,
-        histogram: macdData.histograms.length > 0 ? macdData.histograms[macdData.histograms.length - 1].value : 0,
-      } : null
-    };
-
-    const levels = deriveSuggestedTradeLevels(klines[klines.length - 1].close, latestIndicators);
-
-    if (levels) {
-      const entryColor = levels.side === 'LONG' ? '#00e5ff' : '#ff7043';
-      const aggressiveColor = '#7c4dff';
-      candlestickSeries.createPriceLine({
-        price: levels.conservativeEntry,
-        color: entryColor,
-        lineWidth: 2,
-        lineStyle: LineStyle.Dashed,
-        axisLabelVisible: true,
-        title: formatLevelText('保守入場', levels.conservativeEntry),
-      });
-      candlestickSeries.createPriceLine({
-        price: levels.aggressiveEntry,
-        color: aggressiveColor,
-        lineWidth: 2,
-        lineStyle: LineStyle.Dashed,
-        axisLabelVisible: true,
-        title: formatLevelText('激進入場', levels.aggressiveEntry),
-      });
-      candlestickSeries.createPriceLine({
-        price: levels.takeProfit1,
-        color: '#00e676',
-        lineWidth: 1,
-        lineStyle: LineStyle.Dotted,
-        axisLabelVisible: true,
-        title: formatLevelText('TP1', levels.takeProfit1),
-      });
-      candlestickSeries.createPriceLine({
-        price: levels.stopLoss,
-        color: '#ff1744',
-        lineWidth: 1,
-        lineStyle: LineStyle.Dotted,
-        axisLabelVisible: true,
-        title: formatLevelText('SL', levels.stopLoss),
-      });
-    }
-
-    const alertMarkers: SeriesMarker<any>[] = alerts
-      .map((alert) => {
-        const alertTime = Math.floor(alert.timestamp / 1000);
-        const nearest = [...klines].reverse().find((kline) => kline.time <= alertTime) ?? klines[klines.length - 1];
-        const isBullish = alert.type === 'pump' || alert.type === 'whale-buy';
-        const shortType = alert.type === 'whale-buy' || alert.type === 'whale-sell' ? '巨鯨' : isBullish ? '急漲' : '急跌';
-        return {
-          id: alert.id,
-          time: nearest.time as any,
-          position: isBullish ? 'belowBar' : 'aboveBar',
-          shape: isBullish ? 'arrowUp' : 'arrowDown',
-          color: isBullish ? '#00e676' : '#ff1744',
-          text: `${shortType} $${formatCryptoPrice(alert.price)}`,
-          size: alert.quoteValue ? 1.45 : 1.15,
-        } satisfies SeriesMarker<any>;
-      })
-      .slice(0, 30);
-    createSeriesMarkers(candlestickSeries, alertMarkers, { zOrder: 'top' });
-
+    lineSeriesRef.current = [smaSeries, emaSeries, bbUpperSeries, bbLowerSeries];
+    markersRef.current = createSeriesMarkers(candlestickSeries, [], { zOrder: 'top' });
+    priceLinesRef.current = [];
+    firstDataRef.current = true;
     chartRef.current = chart;
 
-    // Update state indicators
-    setIndicators(latestIndicators);
-
-    // Responsive resize handler
-    const handleResize = () => {
-      if (chartContainerRef.current && chartRef.current) {
-        chartRef.current.resize(chartContainerRef.current.clientWidth, 400);
-      }
-    };
-    window.addEventListener('resize', handleResize);
+    const container = chartContainerRef.current;
+    const observer = new ResizeObserver(() => {
+      if (container.clientWidth > 0 && container.clientHeight > 0) chart.resize(container.clientWidth, container.clientHeight);
+    });
+    observer.observe(container);
 
     return () => {
-      window.removeEventListener('resize', handleResize);
+      observer.disconnect();
       chart.remove();
       chartRef.current = null;
       candlestickSeriesRef.current = null;
+      lineSeriesRef.current = [];
+      markersRef.current = null;
+      priceLinesRef.current = [];
     };
-  }, [klines, theme, alerts]);
+  }, [theme, chartKey]);
 
-  // Handle Real-Time Price ticks to update the chart in real time!
+  // Trades update the actual event-time bucket; authoritative klines reconcile OHLCV.
   useEffect(() => {
-    if (!candlestickSeriesRef.current || klines.length === 0 || currentPrice === null) return;
+    if (!isCurrentData || liveTicker?.symbol !== symbol || liveTicker.priceSource !== 'trade' || !liveTicker.priceTimestamp) return;
+    const timer = setTimeout(() => setKlines(previous => applyTradeToKlines(previous, liveTicker.price, liveTicker.priceTimestamp!, timeframe, liveTicker.tradeId)), 0);
+    return () => clearTimeout(timer);
+  }, [isCurrentData, liveTicker, symbol, timeframe]);
 
-    const lastKline = klines[klines.length - 1];
-    const latestClose = currentPrice;
-    
-    // Create new tick candle updating the last candle
-    // Binance WebSocket sends live close, but if we don't have new time interval yet, update last candle
-    const updatedCandle: CandlestickData = {
-      time: lastKline.time as any,
-      open: lastKline.open,
-      high: Math.max(lastKline.high, latestClose),
-      low: Math.min(lastKline.low, latestClose),
-      close: latestClose,
-    };
+  useEffect(() => {
+    const candles = candlestickSeriesRef.current;
+    if (!isCurrentData || !candles || !klines.length) return;
+    const precision = getPricePrecision(klines[klines.length - 1].close);
+    candles.applyOptions({ priceFormat: { type: 'price', precision, minMove: 10 ** -precision } });
+    candles.applyOptions({ autoscaleInfoProvider: (original: () => AutoscaleInfo | null) => {
+      const scale = original();
+      if (!scale?.priceRange || !followPlan) return scale;
+      const prices = followPlanLines(followPlan).map(line => line.price);
+      return { ...scale, priceRange: { minValue: Math.min(scale.priceRange.minValue, ...prices), maxValue: Math.max(scale.priceRange.maxValue, ...prices) } };
+    } });
+    const data: CandlestickData[] = klines.map(candle => ({ ...candle, time: candle.time as UTCTimestamp }));
+    candles.setData(data);
+    bundle.lines.forEach((line, index) => lineSeriesRef.current[index]?.setData(line));
+    if (firstDataRef.current) { chartRef.current?.timeScale().fitContent(); firstDataRef.current = false; }
+    const levels = deriveSuggestedTradeLevels(klines[klines.length - 1].close, bundle.indicators);
+    const options = followPlan && followPlan.symbol === symbol && followPlan.marketType === marketType
+      ? followPlanLines(followPlan).map(line => ({ ...line, title: formatLevelText(line.title, line.price), lineStyle: LineStyle.Dashed }))
+      : levels ? [
+      { price: levels.conservativeEntry, color: levels.side === 'LONG' ? '#00e5ff' : '#ff7043', title: formatLevelText(levels.conservativePlan.mode === 'WAIT_CONFIRMATION' ? levels.side === 'LONG' ? '待收復' : '待跌破' : '保守觀察', levels.conservativeEntry), lineStyle: LineStyle.Dashed },
+      { price: levels.aggressiveEntry, color: '#7c4dff', title: formatLevelText(levels.aggressivePlan.mode === 'WAIT_CONFIRMATION' ? levels.side === 'LONG' ? '待收復中軌' : '待跌破中軌' : '激進觀察', levels.aggressiveEntry), lineStyle: LineStyle.Dashed },
+      { price: levels.takeProfit1, color: '#00e676', title: formatLevelText(levels.marketPlanValid ? 'TP1' : '條件 TP1', levels.takeProfit1), lineStyle: LineStyle.Dotted },
+      { price: levels.stopLoss, color: '#ff1744', title: formatLevelText(levels.marketPlanValid ? 'SL' : '條件 SL', levels.stopLoss), lineStyle: LineStyle.Dotted },
+    ] : [];
+    while (priceLinesRef.current.length > options.length) candles.removePriceLine(priceLinesRef.current.pop()!);
+    options.forEach((option, index) => {
+      if (priceLinesRef.current[index]) priceLinesRef.current[index].applyOptions(option);
+      else priceLinesRef.current[index] = candles.createPriceLine({ ...option, lineWidth: 1, axisLabelVisible: true });
+    });
+  }, [klines, bundle, isCurrentData, chartKey, theme, followPlan, symbol, marketType]);
 
-    candlestickSeriesRef.current.update(updatedCandle);
-  }, [currentPrice, klines]);
+  useEffect(() => {
+    if (!isCurrentData || !klines.length) return;
+    const markers: SeriesMarker<Time>[] = alerts.filter(alert => alert.marketType === marketType && alert.symbol === symbol)
+      .slice(0, 30).map(alert => {
+        const nearest = [...klines].reverse().find(candle => candle.time <= alert.timestamp / 1000) ?? klines[0];
+        const bullish = alert.type === 'pump' || alert.type === 'whale-buy';
+        return { id: alert.id, time: nearest.time as UTCTimestamp, position: bullish ? 'belowBar' : 'aboveBar', shape: bullish ? 'arrowUp' : 'arrowDown', color: bullish ? '#00e676' : '#ff1744', text: `${alert.type.startsWith('whale') ? '巨鯨' : bullish ? '急漲' : '急跌'} $${formatCryptoPrice(alert.price)}` } satisfies SeriesMarker<Time>;
+      }).sort((a, b) => Number(a.time) - Number(b.time));
+    markersRef.current?.setMarkers(markers);
+  }, [alerts, klines, isCurrentData, chartKey, theme, marketType, symbol]);
 
   const timeframes = [
     { label: '1m', value: '1m' },
@@ -498,12 +477,12 @@ export default function ChartContainer({ symbol, coinName, logo, currentPrice, m
   ];
 
   // Dynamically compute current Open Interest USD value
-  const openInterestUSD = (oiQty !== null && currentPrice !== null) ? oiQty * currentPrice : null;
-  const tradeLevels = !loading && !error && klines.length > 0 && currentPrice !== null ? deriveSuggestedTradeLevels(currentPrice, indicators) : null;
+  const openInterestUSD = (oiQty?.key === `${marketType}:${symbol}` && oiQty.quantity !== null && currentPrice !== null) ? oiQty.quantity * currentPrice : null;
+  const tradeLevels = isCurrentData && !loading && !error && klines.length > 0 && currentPrice !== null ? deriveSuggestedTradeLevels(currentPrice, indicators) : null;
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column' }}>
-      <div className="card chart-card">
+    <div className="chart-workspace-content" style={{ display: 'flex', flexDirection: 'column' }}>
+      <div className={`card chart-card${followPlan ? ' has-follow-plan' : ''}`}>
         <div className="chart-header">
           <div className="chart-title-section">
             {logo ? <img src={logo} alt={coinName} className="coin-logo" /> : <div className="focus-logo-fallback">{symbol.slice(0, 2)}</div>}
@@ -524,10 +503,12 @@ export default function ChartContainer({ symbol, coinName, logo, currentPrice, m
               </button>
             ))}
           </div>
+          <span className="chart-stream-status" role="status" title="K 線串流狀態">{streamStatus === 'connected' ? 'K 線同步中' : 'K 線待同步'}</span>
         </div>
 
+        {followPlan && <FollowPlanSummary plan={followPlan} onClose={onHideFollowPlan} />}
         <div className="chart-container" style={{ position: 'relative' }}>
-          {(loading || error) && (
+          {(loading || error || !isCurrentData) && (
             <div style={{
               position: 'absolute',
               top: 0, left: 0, right: 0, bottom: 0,
@@ -538,31 +519,31 @@ export default function ChartContainer({ symbol, coinName, logo, currentPrice, m
               zIndex: 10,
               borderRadius: 'var(--radius-md)'
             }}>
-              {error ? <div role="alert" className="chart-error"><span>{error}</span><button className="utility-icon-button" onClick={() => setRetry(value => value + 1)}>重新載入</button></div> : '載入中...'}
+              {error ? <div role="alert" className="chart-error"><span>{error}</span><button className="utility-icon-button" onClick={() => setRetry(value => value + 1)}>重新載入</button></div> : <span role="status">{symbol} · {timeframe} 載入中...</span>}
             </div>
           )}
-          <div ref={chartContainerRef} style={{ width: '100%', height: '400px' }} />
+          <div ref={chartContainerRef} className="chart-canvas-host" />
         </div>
 
-        {tradeLevels && (
+        {tradeLevels && !followPlan && (
           <div className="entry-level-strip">
             <div className={`entry-level-side ${tradeLevels.side.toLowerCase()}`}>
-              {tradeLevels.side === 'LONG' ? '多方觀察點' : '空方觀察點'}
+              {!tradeLevels.marketPlanValid ? tradeLevels.side === 'LONG' ? '等待收復' : '等待跌破' : tradeLevels.side === 'LONG' ? '多方觀察點' : '空方觀察點'}
             </div>
             <div>
-              <span>保守</span>
+              <span>{tradeLevels.conservativePlan.mode === 'WAIT_CONFIRMATION' ? tradeLevels.side === 'LONG' ? '保守 · 待收復' : '保守 · 待跌破' : '保守觀察'}</span>
               <strong>${formatCryptoPrice(tradeLevels.conservativeEntry)}</strong>
             </div>
             <div>
-              <span>激進</span>
+              <span>{tradeLevels.aggressivePlan.mode === 'WAIT_CONFIRMATION' ? tradeLevels.side === 'LONG' ? '激進 · 待收復' : '激進 · 待跌破' : '激進觀察'}</span>
               <strong>${formatCryptoPrice(tradeLevels.aggressiveEntry)}</strong>
             </div>
             <div>
-              <span>TP1</span>
+              <span>{tradeLevels.marketPlanValid ? 'TP1' : '條件 TP1'}</span>
               <strong className="trend-up">${formatCryptoPrice(tradeLevels.takeProfit1)}</strong>
             </div>
             <div>
-              <span>SL</span>
+              <span>{tradeLevels.marketPlanValid ? 'SL' : '條件 SL'}</span>
               <strong className="trend-down">${formatCryptoPrice(tradeLevels.stopLoss)}</strong>
             </div>
           </div>
@@ -572,32 +553,32 @@ export default function ChartContainer({ symbol, coinName, logo, currentPrice, m
           <div className="indicator-pill">
             <span className="indicator-pill-label">RSI (14)</span>
             <span className="indicator-pill-val">
-              {indicators.rsi ? indicators.rsi.toFixed(2) : 'N/A'}
+              {isCurrentData && indicators.rsi !== null ? indicators.rsi.toFixed(2) : '--'}
             </span>
           </div>
           <div className="indicator-pill">
             <span className="indicator-pill-label">MACD (12, 26)</span>
             <span className="indicator-pill-val" style={{ color: '#ffb300' }}>
-              {indicators.macd ? indicators.macd.macd.toFixed(4) : 'N/A'}
+              {isCurrentData && indicators.macd ? indicators.macd.macd.toFixed(4) : '--'}
             </span>
           </div>
           <div className="indicator-pill">
             <span className="indicator-pill-label">SMA (20) / 中軌</span>
             <span className="indicator-pill-val" style={{ color: '#00e5ff' }}>
-              {indicators.sma20 ? `$${formatCryptoPrice(indicators.sma20)}` : 'N/A'}
+              {isCurrentData && indicators.sma20 !== null ? `$${formatCryptoPrice(indicators.sma20)}` : '--'}
             </span>
           </div>
           <div className="indicator-pill">
             <span className="indicator-pill-label">EMA (50)</span>
             <span className="indicator-pill-val" style={{ color: '#7c4dff' }}>
-              {indicators.ema50 ? `$${formatCryptoPrice(indicators.ema50)}` : 'N/A'}
+              {isCurrentData && indicators.ema50 !== null ? `$${formatCryptoPrice(indicators.ema50)}` : '--'}
             </span>
           </div>
         </div>
       </div>
 
       {/* Render the AI Trade Advisor Panel */}
-      {!loading && !error && klines.length > 0 && <SignalAdvisor
+      {isCurrentData && !loading && !error && klines.length > 0 && <SignalAdvisor
         symbol={symbol}
         currentPrice={currentPrice}
         indicators={indicators}

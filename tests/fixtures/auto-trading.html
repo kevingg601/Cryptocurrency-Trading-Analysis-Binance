@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta http-equiv="Content-Security-Policy" content="connect-src 'self'; frame-src 'self'" />
+  <title>Auto Trading Replay QA</title>
+  <style>
+    .auto-replay { width: 100%; max-width: 1920px; padding: 20px; margin: 0 auto; }
+    .auto-replay > h1 { font-size: 18px; margin-bottom: 10px; }
+    .auto-replay-warning { border-left: 3px solid #d9a441; padding: 8px 12px; margin-bottom: 12px; color: var(--text-secondary); }
+    .auto-replay-controls { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+    .auto-replay-controls button { min-height: 36px; border: 1px solid var(--border-glass); border-radius: 6px; padding: 6px 10px; background: var(--bg-secondary); color: var(--text-primary); font: inherit; cursor: pointer; }
+    .auto-replay-controls button:disabled { opacity: .45; cursor: not-allowed; }
+    .auto-replay-controls button:focus-visible { outline: 2px solid var(--accent-primary); outline-offset: 2px; }
+    .auto-replay output { display: block; font-size: 12px; overflow-wrap: anywhere; margin: 6px 0; }
+    .auto-replay > details { margin-top: 12px; font-size: 12px; }
+    .auto-replay pre { max-height: 420px; overflow: auto; padding: 12px; background: var(--bg-secondary); }
+    @media (max-width: 600px) { .auto-replay { padding: 12px; } }
+  </style>
+</head>
+<body><div id="root"></div><script type="module" src="./auto-trading-replay.tsx"></script></body>
+</html>
