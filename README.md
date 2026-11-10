@@ -102,3 +102,17 @@ architecture.md  # 詳細架構說明
 止盈、止損會依實際委託參考價檢查方向。若原有點位不適用現價，畫面會標示條件規劃並停用快捷市價跟單。送出時再次使用最新報價驗證，市價模擬成交也使用最新報價。限價跨價時以觀察到的較佳行情價模擬成交，並非真實訂單簿撮合，不保證實際成交價或獲利。
 
 回歸測試包含 PARTI 截圖案例與做空鏡像案例，紀錄見 `artifacts/order-safety/QA.md`。
+
+## Colab 模型研究
+
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/kevingg601/------------/blob/main/notebooks/model_benchmark_colab.ipynb)
+
+上方為目前分支入口；正式實驗請使用交付的固定 commit 連結，並將同一 commit 填入 Notebook 的 CODE_COMMIT。私有庫需完成網頁授權及 Colab Secrets 的唯讀下載憑證設定。
+
+本機撰寫 → GitHub 固定版本 → Colab 網頁手動選 GPU 執行 → Google Drive 保存資料、權重與結果。
+
+- [逐格操作說明](docs/COLAB_MODEL_BENCHMARK_USAGE.md)
+- [Drive 大檔上傳清單](docs/DRIVE_UPLOAD_MANIFEST.md)
+- [文件索引與歷史紀錄](docs/README.md)
+
+Notebook 開啟不會自動取得完整專案；必須執行初始化格。正式訓練不預跑 smoke；推論及獨立結果匯出不啟動訓練。

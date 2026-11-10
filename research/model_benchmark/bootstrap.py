@@ -13,6 +13,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+os.environ["MPLBACKEND"] = "Agg"
+
 from . import config
 from .common import exclusive_lock
 
@@ -175,6 +177,9 @@ def _download_models(*, retries: int = 3) -> dict[str, Any]:
     lock = json.loads(ASSET_LOCK.read_text(encoding="utf-8"))
     model_results: dict[str, Any] = {}
     for key, model in lock["models"].items():
+        selected = os.environ.get("FADACHI_MODEL_BENCHMARK_MODELS", ",".join(config.MODEL_KEYS)).split(",")
+        if key not in selected:
+            continue
         model_dir = CACHE_ROOT / "models" / key
         model_dir.mkdir(parents=True, exist_ok=True)
         files: dict[str, Any] = {}
@@ -224,15 +229,21 @@ def prepare(*, force: bool = False, manifest_path: Path | None = None) -> dict[s
 
 
 def _prepare_locked(*, force: bool = False, manifest_path: Path | None = None) -> dict[str, Any]:
+    from .registry import get_spec
+    selected = os.environ.get("FADACHI_MODEL_BENCHMARK_MODELS", ",".join(config.MODEL_KEYS)).split(",")
+    if not selected or len(set(selected)) != len(selected):
+        raise ValueError("invalid model selection")
+    required_envs = {"rank", *(get_spec(key).environment for key in selected)}
     ENV_ROOT.mkdir(parents=True, exist_ok=True)
     CACHE_ROOT.mkdir(parents=True, exist_ok=True)
     env_results: dict[str, Any] = {}
     # One setup failure must not prevent setup attempts for later environments.
     for name in ("rank", "chronos", "timesfm"):
-        env_results[name] = _prepare_env(name, force=force)
+        if name in required_envs:
+            env_results[name] = _prepare_env(name, force=force)
     # The rank env owns the shared Hugging Face downloader dependency too, but
     # asset preparation only runs once one of the TS envs has the library.
-    downloader = next((n for n in ("chronos", "timesfm") if env_results[n]["status"] == "ready"), None)
+    downloader = next((n for n in ("chronos", "timesfm") if env_results.get(n, {}).get("status") == "ready"), None)
     if downloader:
         python = _python_path(downloader)
         # Download via the environment interpreter to honor its exact hub version.
@@ -252,9 +263,12 @@ def _prepare_locked(*, force: bool = False, manifest_path: Path | None = None) -
         else:
             asset_results = {"status": "failed", "error": helper.stderr[-3000:]}
     else:
-        asset_results = {"status": "failed", "error": "No TimesFM/Chronos environment is ready to download assets."}
+        asset_results = ({"status": "ready", "models": {}} if required_envs == {"rank"} else
+                         {"status": "failed", "error": "No TimesFM/Chronos environment is ready to download assets."})
 
     for key in ("chronos2", "timesfm25"):
+        if key not in selected:
+            continue
         env_name = "chronos" if key == "chronos2" else "timesfm"
         manifest = {
             **env_results[env_name],

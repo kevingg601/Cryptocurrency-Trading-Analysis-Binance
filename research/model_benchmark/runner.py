@@ -18,6 +18,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+os.environ["MPLBACKEND"] = "Agg"
+
 from .common import atomic_json, emit_stage_event, exclusive_lock, hash_file, hash_tree, verify_artifacts
 from .config import CACHE_ROOT, ENV_ROOT, MODEL_KEYS, REPO_ROOT, RUNS_ROOT, SOURCE_ROOT, TMP_ROOT, benchmark_fingerprint, dataset_identity, model_config, portable_identity
 from .dataset import freeze_common_cohort, load_source
@@ -591,6 +593,7 @@ def _make_run(run_dir: Path, new_run: bool, smoke: bool) -> dict[str, Any]:
                 "fingerprints": fingerprints, "portable_identity": portable_id,
                 "environment_identities": env_identities, "common_cohort": cohort_meta,
                 "test_scope": "既有資料研究比較；TEST 曾被檢視，不是全新獨立測試", "smoke": smoke, "models": models}
+    manifest["selected_models"] = list(MODEL_KEYS)
     atomic_json(state_path, manifest)
     results: dict[str, Any] = {"models": {}}
     identity_drift = False
@@ -693,12 +696,15 @@ def _make_run(run_dir: Path, new_run: bool, smoke: bool) -> dict[str, Any]:
               and "common_error" not in results and lgbm_status.get("status") == "PASSED"
               and all(v.get("common_metrics") and (v["common_metrics"].get("evaluated_groups", 0) > 0 if "directions" in v["common_metrics"] else v["common_metrics"].get("samples", 0) > 0)
                       for k, v in results["models"].items() if k in successful))
-    status = "SUCCESS" if passed else ("PARTIAL" if successful else "FAILED")
+    all_four = set(MODEL_KEYS) == {"catboost", "xgboost", "chronos2", "timesfm25"}
+    status = "SUCCESS" if passed and all_four else ("PARTIAL" if successful else "FAILED")
     manifest["status"] = status
     if smoke:
         manifest["status_reason"] = "SMOKE_ONLY"
     elif identity_drift:
         manifest["status_reason"] = "IDENTITY_DRIFT"
+    elif not all_four:
+        manifest["status_reason"] = "SELECTED_MODELS_ONLY"
     manifest["finished_utc"] = datetime.now(timezone.utc).isoformat()
     manifest["models"] = results["models"]
     manifest["common_summary"] = results.get("common_summary")
@@ -757,11 +763,19 @@ def _find_completed(source_identity: dict[str, Any], fingerprints: dict[str, str
 
 
 def main(argv: list[str] | None = None) -> int:
+    global MODEL_KEYS
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--models", default=",".join(MODEL_KEYS), help="comma-separated registry model keys")
     parser.add_argument("--new-run", action="store_true")
     parser.add_argument("--run-dir", type=Path)
     parser.add_argument("--smoke", action="store_true", help="small adapter contract smoke run; never a full benchmark")
     args = parser.parse_args(argv)
+    selected = tuple(args.models.split(","))
+    if not selected or len(set(selected)) != len(selected):
+        parser.error("--models must be a non-empty unique list")
+    for key in selected:
+        get_spec(key)
+    MODEL_KEYS = selected
     if args.run_dir and args.new_run:
         parser.error("--run-dir and --new-run cannot be combined")
     if args.run_dir:

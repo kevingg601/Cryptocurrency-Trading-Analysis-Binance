@@ -118,3 +118,12 @@ desktop.ini
 *.njsproj
 *.sln
 *.sw?
+
+# Colab exported runs, local delivery packages, and reference model weights
+/colab-*-full/
+/colab-*-smoke/
+/infer-*/
+/drive-upload/
+**/lgbm_long_ranker.txt
+**/lgbm_short_ranker.txt
+**/adapter/

@@ -30,6 +30,7 @@ def _configure_project_cache(context: dict[str, Any]) -> None:
         "TMP": tmp,
         "TEMP": tmp,
         "PYTHONUTF8": "1",
+        "MPLBACKEND": "Agg",
         "PYTHONIOENCODING": "utf-8",
     }.items():
         os.environ[name] = str(value)

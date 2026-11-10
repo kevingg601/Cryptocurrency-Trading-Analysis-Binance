@@ -43,6 +43,7 @@ def make_colab_environment(
         result.pop(key, None)
     result["PYTHONUTF8"] = "1"
     result["PYTHONNOUSERSITE"] = "1"
+    result["MPLBACKEND"] = "Agg"
     result["PYTHONPATH"] = str(repo_root.resolve())
     return result
 
@@ -207,7 +208,7 @@ def prepare_environments(repo_root: Path, env: dict[str, str]) -> dict[str, Any]
         raise RuntimeError("Colab bootstrap exited without its environment manifest.")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if manifest.get("status") != "ready":
-        raise RuntimeError("All three model environments and pinned model assets must be ready before training.")
+        raise RuntimeError("Selected model environments and pinned model assets must be ready before training.")
     return manifest
 
 

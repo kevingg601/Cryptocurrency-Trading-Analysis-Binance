@@ -10,7 +10,7 @@
 powershell -NoProfile -ExecutionPolicy Bypass -File "D:\PYTHON\fadachi\scripts\run-model-benchmark.ps1"
 ```
 
-依序準備鎖定環境及權重，訓練 CatBoost／XGBoost 多空排名模型，微調 Chronos-2／TimesFM 2.5，再產生比較報告。未完成時同一行命令依身分核對後續跑；完成後同命令顯示報告。`-NewRun` 可開新實驗，`-RunDir` 可指定舊 run。詳細介面、資料與擴充說明見 [README](research/model_benchmark/README.md)。
+依序準備鎖定環境及權重，訓練 CatBoost／XGBoost 多空排名模型，微調 Chronos-2／TimesFM 2.5，再產生比較報告。未完成時同一行命令依身分核對後續跑；完成後同命令顯示報告。`-NewRun` 可開新實驗，`-RunDir` 可指定舊 run。詳細介面、資料與擴充說明見 [README](../../research/model_benchmark/README.md)。
 
 報告位置：`data/model-benchmark/runs/<run-id>/comparison.md`，同目錄另有 CSV、JSON、manifest、模型與日誌。
 

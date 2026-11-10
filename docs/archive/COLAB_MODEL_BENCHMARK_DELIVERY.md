@@ -1,10 +1,10 @@
 # Colab 四模型 Notebook 交付紀錄
 
-本文保留初版及先前補修的驗證紀錄。最新的 VS Code／Python 3.13 核心支援版本，請見 [VS Code 交付紀錄](VSCODE_COLAB_DELIVERY.md) 與 [目前操作說明](COLAB_MODEL_BENCHMARK_USAGE.md)；下方舊 ZIP hash 對應初版資料包。
+本文保留初版及先前補修的驗證紀錄。最新的 VS Code／Python 3.13 核心支援版本，請見 [VS Code 交付紀錄](VSCODE_COLAB_DELIVERY.md) 與 [目前操作說明](../COLAB_MODEL_BENCHMARK_USAGE.md)；下方舊 ZIP hash 對應初版資料包。
 
 日期：2026-11-10。工作目錄：`D:\PYTHON\fadachi`。
 
-使用者於 Colab 改造計畫後回覆「修改」，本次依確認範圍實作、測試及獨立審查。操作方式見 [使用說明](COLAB_MODEL_BENCHMARK_USAGE.md)。
+使用者於 Colab 改造計畫後回覆「修改」，本次依確認範圍實作、測試及獨立審查。操作方式見 [使用說明](../COLAB_MODEL_BENCHMARK_USAGE.md)。
 
 ## 交付檔案
 

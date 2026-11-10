@@ -2,7 +2,7 @@
 
 日期：2026-11-10。工作目錄：`D:\PYTHON\fadachi`。
 
-依使用者「我都是在 VS Code 中執行的，你改程式」指示，入口改為在 VS Code 保留現有 Colab Python 3.12／3.13 核心。模型訓練仍使用固定 Python 3.12 獨立環境，維持原四模型、依賴鎖、資料、超參數及評估規格。詳見 [操作說明](COLAB_MODEL_BENCHMARK_USAGE.md)。
+依使用者「我都是在 VS Code 中執行的，你改程式」指示，入口改為在 VS Code 保留現有 Colab Python 3.12／3.13 核心。模型訓練仍使用固定 Python 3.12 獨立環境，維持原四模型、依賴鎖、資料、超參數及評估規格。詳見 [操作說明](../COLAB_MODEL_BENCHMARK_USAGE.md)。
 
 ## 相容方式
 
