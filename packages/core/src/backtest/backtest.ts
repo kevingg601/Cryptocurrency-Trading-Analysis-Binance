@@ -1,4 +1,4 @@
-import type { KlineData, MarketType } from './binance';
+import type { KlineData, MarketType } from '../market/types.ts';
 
 export type BotStrategy = 'ema-trend' | 'rsi-reversal';
 type BotSide = 'LONG' | 'SHORT';

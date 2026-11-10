@@ -1,0 +1,58 @@
+# 第二輪 Codex 審查與修正任務契約
+
+## 任務背景與角色
+你是 Antigravity Boost 完成第一輪實作後的第二輪審查與修正執行端，直接處理已交接的工作。不要重新啟動第一輪、planner、Boost 或其他代理，不呼叫 agy、本 Skill、其他 AI CLI 或外部 AI，避免遞迴委派。
+
+目標工作專案路徑：`D:\PYTHON\fadachi`。
+原實作計畫檔：`D:\PYTHON\fadachi\AI_ANALYSIS_AB_IMPLEMENTATION_PLAN.md`。
+
+## 適用的規範與禁止事項
+1. 閱讀適用的 AGENTS.md。若存在與本次使用者明確授權相衝突的舊主控／只讀 reviewer 流程，依本次審查並修正的授權執行，同時保留其他安全、資料與工作區規範；不修改規範檔來解除限制。無法釐清授權時先回報。
+2. 嚴格工作區邊界：所有讀寫與執行必須封閉在 `D:\PYTHON\fadachi` 之內，嚴禁跨出此專案目錄。
+3. 嚴禁瀏覽器與桌面 UI 操作：禁止瀏覽器與桌面 UI 操作、預覽、截圖、DOM 擷取、互動及視覺驗證；禁止 CUA、Playwright、Puppeteer、Selenium、CDP 與無頭瀏覽器，不經由 shell 或其他代理繞過，也不安裝或下載瀏覽器。
+4. 可唯讀查閱必要依賴，只能寫入明確允許的檔案。獨立檢查邏輯、邊界條件、型別、例外、相容性與回歸；直接修正有依據的缺陷，保留正確成果，不做無關重構、擴充功能或為了產生第二版而重寫。沒有缺陷可零修改。
+5. 不覆蓋使用者或其他代理未交接的修改，不刪除資料、不覆寫模型或結果，不修改機密及全域設定。遵守專案資料切分與前處理規範，不啟動未授權的長時間訓練、下載或部署。
+6. 只執行變更相關的語法、型別、lint、建置及不啟動瀏覽器的必要測試。在 Windows PowerShell 下執行命令請使用 `npm.cmd test`、`npm.cmd run lint`、`npm.cmd run build`。會啟動瀏覽器的部分略過並回報。必要檢查通過後，不重跑無新疑慮的完整測試。
+7. 以繁體中文回報具體問題、嚴重度、檔案位置、觸發條件、修正理由、指令結果及未驗證事項。涉及前端時註明「依使用者要求，未進行瀏覽器、畫面與互動驗證」。
+
+## 可修改檔案範圍
+- `packages/core/src/auto/abCoordinator.ts`
+- `packages/core/src/ai/**`
+- `packages/core/src/indicators/**`
+- `packages/core/src/backtest/tradeReplay.ts`
+- `packages/core/test/abCoordinator.test.ts`
+- `packages/core/test/indicators.test.ts`
+- `packages/core/test/tradeReplay.test.ts`
+- `apps/collector/src/ai/**`
+- `apps/collector/src/api/server.ts`
+- `apps/collector/src/main.ts`
+- `apps/collector/test/abStorage.test.ts`
+- `apps/web/src/api/collectorClient.ts`
+- `apps/web/src/components/AutoTrading.tsx`
+- `apps/web/src/components/AIAnalysisCenter.tsx`
+- `apps/web/src/components/AutoTrading.css`
+- `apps/web/src/components/AIAnalysisCenter.css`
+- `apps/web/src/App.tsx`
+- 若有修改上述前端或 collector 程式碼，請依序執行 `npm.cmd test`、`npm.cmd run lint`、`npm.cmd run build`，並確保建置產物一致更新。
+
+## 禁止修改範圍
+- `reviews/**`（輸出目錄，排除於受審範圍）
+- 根目錄及其他無關測試與組件
+- 不要自動 commit、stash、reset、checkout 或刪除非本輪產出的檔案。
+
+## 第一輪變更摘要與測試結果
+DeepCoder 完成了 A/B 交易對照系統、AI 分析中心、DuckDB 持久化（`ai_entry_decisions`、`ab_trading_batches` 等）、Excel CSV 公式注入防護、AICLIRunner 沙盒隔離檢查、持倉中部位追蹤等。
+已通過驗證：
+- `npm.cmd test`：249 測試通過，0 失敗。
+- `npm.cmd run lint`：0 錯誤。
+- `npm.cmd run build`：0 錯誤。
+- `node scripts/verify-desktop.cjs dist-desktop/20261030-ai-ab/app-staging dist-desktop/20261030-ai-ab/win-unpacked/resources/app.asar`：14 檔案 SHA-256 全數吻合。
+
+## 審查重點
+1. 請依據 `AI_ANALYSIS_AB_IMPLEMENTATION_PLAN.md` 逐項審查：
+   - A/B 對照是否公平：同成交序列、同時間、同風控與費用、晚到不可補進場、亂序防禦、Infinity 編解碼。
+   - DuckDB 儲存：雙表原子寫入、樂觀鎖 revision、決策儲存與讀取 API。
+   - AICLIRunner：嚴格隔離驗證，未通過時強制停用 Provider，不留安全性漏洞。
+   - 前端契約與 UI 狀態：幣種上限去重後驗證、歷史批次檢視正確綁定、CSV 匯出安全。
+2. 若發現實質缺陷或邊界漏洞，直接進行最小範圍的精準修正，並執行必要的測試及建置確認。
+3. 若無缺陷，請給予零修改並出具繁體中文審查報告。

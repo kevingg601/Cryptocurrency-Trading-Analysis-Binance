@@ -1,6 +1,6 @@
-import type { AggregateTradeData, MarketType } from './binance';
-import type { FollowPlan, FollowPlanEvent } from './followPlans';
-import type { MarketAlert } from './marketAlerts';
+import type { AggregateTradeData, MarketType } from './types.ts';
+import type { FollowPlan, FollowPlanEvent } from '../follow/followPlans.ts';
+import type { MarketAlert } from '../alerts/marketAlerts.ts';
 
 export interface MarketTradeFrame {
   trade: AggregateTradeData;

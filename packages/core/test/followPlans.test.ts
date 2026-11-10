@@ -1,10 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { FollowPlanTracker, createFollowPlan } from '../src/services/followPlans.ts';
-import { followPlanLines } from '../src/services/followPlanLines.ts';
-import { MarketAlertDetector } from '../src/services/marketAlerts.ts';
-import type { MarketAlert } from '../src/services/marketAlerts.ts';
-import type { AggregateTradeData } from '../src/services/binance.ts';
+import { FollowPlanTracker, createFollowPlan } from '../src/follow/followPlans.ts';
+import { followPlanLines } from '../src/follow/followPlanLines.ts';
+import { MarketAlertDetector } from '../src/alerts/marketAlerts.ts';
+import type { MarketAlert } from '../src/alerts/marketAlerts.ts';
+import type { AggregateTradeData } from '../src/market/binance.ts';
 
 const epoch = 1_800_000_000_000;
 const alert = (changes: Partial<MarketAlert> = {}): MarketAlert => ({

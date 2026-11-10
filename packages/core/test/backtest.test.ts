@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { runBacktest } from '../src/services/backtest.ts';
-import { deriveSuggestedTradeLevels } from '../src/services/tradeLevels.ts';
+import { runBacktest } from '../src/backtest/backtest.ts';
+import { deriveSuggestedTradeLevels } from '../src/orders/tradeLevels.ts';
 
 const candles = Array.from({ length: 240 }, (_, i) => {
   const close = 100 + 12 * Math.sin(i / 9);

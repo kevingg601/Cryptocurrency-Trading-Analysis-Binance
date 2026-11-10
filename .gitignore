@@ -1,20 +1,66 @@
 # Dependencies
 node_modules/
 
+# TypeScript & Build Tooling
+*.tsbuildinfo
+node-compile-cache/
+.eslintcache
+.parcel-cache/
+.turbo/
+
 # Build and packaged application output
 dist/
 dist-ssr/
 dist-desktop/
 AntigravityCrypto-Desktop/
+out/
 
-# Local environments and settings
+# Python: Bytecode, Caching & Testing
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.coverage
+.coverage.*
+htmlcov/
+nosetests.xml
+coverage.xml
+*.cover
+.ipynb_checkpoints/
+
+# Virtual Environments
 .venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Benchmark, AI CLI, Test & Review Temporary Directories
+.benchmark-envs/
+.benchmark-cache/
+.benchmark-tmp/
+.*-tmp/
+*-tmp/
+.review-process-*/
+cli-probe-profile/
+Fadachi-AI-Profile-*/
+
+# Local environments and secrets
 .env
 .env.*
 !.env.example
 *.local
+*.pem
+*.key
+*.cert
+*.crt
 
-# Logs
+# Logs & Event Stream Dumps
 logs/
 *.log
 npm-debug.log*
@@ -22,18 +68,51 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
+reviews/**/events.jsonl
 
 # Generated archives and installers
 *.zip
 *.exe
 *.msi
+*.dmg
+*.AppImage
+*.deb
+*.rpm
+
+# Databases & Local State
+*.duckdb
+*.duckdb.wal
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# Data, Datasets, Cache & Large ML Model Weights
+data/
+data-reruns/
+.cache/
+*.parquet
+*.arrow
+*.feather
+*.safetensors
+*.pt
+*.pth
+*.onnx
+*.bin
+*.ckpt
+*.joblib
+*.pkl
+*.pickle
 
 # Editor and operating-system files
 .vscode/*
 !.vscode/extensions.json
+!.vscode/settings.json
 .idea/
 .DS_Store
 Thumbs.db
+desktop.ini
 *.suo
 *.ntvs*
 *.njsproj

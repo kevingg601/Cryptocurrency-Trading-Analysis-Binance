@@ -1,11 +1,11 @@
 import test from 'node:test';
 import type { TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { MarketAlertDetector, DEFAULT_MARKET_ALERT_SETTINGS, normalizeMarketAlertSettings } from '../src/services/marketAlerts.ts';
-import { applyTradeToKlines, upsertKline, mergeQuote } from '../src/services/liveMarket.ts';
-import { connectMarketStreams, marketStreamUrls } from '../src/services/marketStream.ts';
-import { connectAggregateTradeWebSocket, connectTickerWebSocket, connectKlineWebSocket } from '../src/services/binance.ts';
-import type { KlineData } from '../src/services/binance.ts';
+import { MarketAlertDetector, DEFAULT_MARKET_ALERT_SETTINGS, normalizeMarketAlertSettings } from '../src/alerts/marketAlerts.ts';
+import { applyTradeToKlines, upsertKline, mergeQuote } from '../src/market/liveMarket.ts';
+import { connectMarketStreams, marketStreamUrls } from '../src/market/marketStream.ts';
+import { connectAggregateTradeWebSocket, connectTickerWebSocket, connectKlineWebSocket } from '../src/market/binance.ts';
+import type { KlineData } from '../src/market/binance.ts';
 
 const epoch = 1_800_000_000_000;
 const ticker = (price: number) => ({ symbol: 'TESTUSDT', price });

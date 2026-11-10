@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="zh-Hant"><head><meta charset="UTF-8" /><title>Responsive Viewport QA</title><style>body{margin:0;background:#242828;color:#fff;font:12px sans-serif}iframe{display:block;border:0}header{padding:6px}</style></head><body><header><span id="label"></span> <select aria-label="測試視窗尺寸"><option value="390,844">390 x 844</option><option value="1366,850">1366 x 850</option><option value="1440,900">1440 x 900</option><option value="1920,1080">1920 x 1080</option></select></header><iframe title="尺寸驗證"></iframe><script>
+const params = new URLSearchParams(location.search);
+const width = Math.max(320, Math.min(1920, Number(params.get('width')) || 1366));
+const height = Math.max(600, Math.min(1200, Number(params.get('height')) || 850));
+const frame = document.querySelector('iframe');
+frame.style.width = `${width}px`;
+frame.style.height = `${height}px`;
+frame.src = params.get('target') === 'live' ? '/' : './follow-plan.html';
+const select = document.querySelector('select');
+select.value = `${width},${height}`;
+function resize(w, h) {
+  frame.style.width = `${w}px`;
+  frame.style.height = `${h}px`;
+  document.querySelector('#label').textContent = `QA iframe viewport ${w} x ${h}`;
+}
+resize(width, height);
+select.addEventListener('change', () => { const [w, h] = select.value.split(',').map(Number); resize(w, h); });
+</script></body></html>

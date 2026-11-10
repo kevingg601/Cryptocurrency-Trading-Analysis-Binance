@@ -1,5 +1,5 @@
 import { connectMarketStreams } from './marketStream.ts';
-import type { StreamStatusCallback } from './marketStream';
+import type { StreamStatusCallback } from './marketStream.ts';
 // Binance API and WebSocket integration service supporting Spot and Futures dynamically
 
 export type MarketType = 'spot' | 'futures';

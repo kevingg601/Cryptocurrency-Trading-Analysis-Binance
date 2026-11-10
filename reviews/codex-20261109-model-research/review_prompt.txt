@@ -1,0 +1,61 @@
+# 第二輪 Codex 審查與修正任務契約：LightGBM 選幣排名與 Kronos 預測整合計畫
+
+## 任務背景與角色
+你是 Antigravity Boost 完成第一輪實作後的第二輪審查與修正執行端，直接處理已交接的工作。不要重新啟動第一輪、planner、Boost 或其他代理，不呼叫 `agy`、本 Skill、其他 AI CLI 或外部 AI，避免遞迴委派。
+
+目標工作專案路徑：`D:\PYTHON\fadachi`。
+原實作計畫檔：`D:\PYTHON\fadachi\LIGHTGBM_KRONOS_IMPLEMENTATION_PLAN.md`。
+第一輪交付說明檔：`D:\PYTHON\fadachi\MODEL_RESEARCH_DELIVERY.md`。
+
+## 適用的規範與禁止事項
+1. 閱讀適用的 `AGENTS.md`。若存在與本次使用者明確授權相衝突的舊主控／只讀 reviewer 流程，依本次審查並修正的授權執行，同時保留其他安全、資料與工作區規範；不修改規範檔來解除限制。無法釐清授權時先回報。
+2. 嚴格工作區邊界與虛擬環境隔離：
+   - 所有讀寫與執行必須封閉在 `D:\PYTHON\fadachi` 之內，嚴禁跨出此專案目錄。
+   - Python 指令必須使用當前工作區專屬虛擬環境：`D:\PYTHON\fadachi\.venv\Scripts\python.exe`。
+3. 嚴禁瀏覽器與桌面 UI 操作：禁止瀏覽器與桌面 UI 操作、預覽、截圖、DOM 擷取、互動及視覺驗證；禁止 CUA、Playwright、Puppeteer、Selenium、CDP 與無頭瀏覽器，不經由 shell 或其他代理繞過，也不安裝或下載瀏覽器。
+4. 可唯讀查閱必要依賴，只能寫入明確允許的檔案。獨立檢查邏輯、邊界條件、型別、例外、相容性與回歸；直接修正有依據的缺陷，保留正確成果，不做無關重構、擴充功能或為了產生第二版而重寫。沒有缺陷可零修改。
+5. 不覆蓋使用者或其他代理未交接的修改，不刪除資料、不覆寫已產出的模型或評估結果（除非是為修復實際 bug 而需要小幅更新 manifest），不修改機密及全域設定。遵守專案資料切分與前處理規範，不啟動未授權的長時間訓練、重新下載全量資料或部署。
+6. 只執行變更相關的語法、型別、lint、建置及不啟動瀏覽器的必要測試。在 Windows PowerShell 下執行命令請使用 `.\.venv\Scripts\python.exe -m pytest research/tests/test_model_research.py`、`npm.cmd test`、`npm.cmd run lint`、`npm.cmd run build`。必要檢查通過後，不重跑無新疑慮的完整測試。
+7. 以繁體中文回報具體問題、嚴重度、檔案位置、觸發條件、修正理由、指令結果及未驗證事項。涉及前端時註明「依使用者要求，未進行瀏覽器、畫面與互動驗證」。
+
+## 可修改檔案範圍
+- `research/model_research/**`
+- `research/tests/test_model_research.py`
+- `research/requirements.txt`
+- `packages/core/src/research/**`
+- `packages/core/src/index.ts`
+- `apps/collector/src/research/**`
+- `apps/collector/src/api/server.ts`
+- `apps/collector/src/main.ts`
+- `apps/collector/test/modelResearch.test.ts`
+- `apps/web/src/api/collectorClient.ts`
+- `apps/web/src/components/ModelResearchCenter.tsx`
+- `apps/web/src/components/ModelResearchCenter.css`
+- `apps/web/src/App.tsx`
+- `apps/web/test/modelResearchPanel.test.ts`
+- `MODEL_RESEARCH_DELIVERY.md`
+- 若有修改前端或 collector/core 程式碼，請執行 `npm.cmd run build` 確保建置產物同步。
+
+## 禁止修改範圍
+- `reviews/**`（本輪審查輸出目錄，排除於受審範圍）
+- `data/model-research/weights/**`（已下載的模型權重）
+- 其他無關模組（如舊有 A/B 交易與點位儀表板無關檔案）
+- 不要自動 commit、stash、reset、checkout、clean 或刪檔。
+
+## 第一輪實作成果與已知事項
+1. 已建立 `.venv` 環境（`Python 3.12.14`, `torch==2.6.0+cu126`, `lightgbm==4.6.0`），並於 RTX 4050 Laptop GPU (6 GB VRAM) 完成實際驗證。
+2. 已完成 20 幣 × 180 天（120d 訓練 / 30d 驗證 / 30d 測試 + 暖機期）1h K 線與資金費率資料集、LightGBM 多空雙 Ranker 訓練、Kronos-small 與 Kronos-base 實際單幣推論及 580 組每日 UTC 00:00 離線公平比較，並如實揭露實測結果（未優於零報酬基準，不宣稱有效）。
+3. 已實作 Python JSONL worker (`shell: false`, `windowsHide: true`)、Collector `/api/research/status`, `/api/research/latest`, `/api/research/run`, `/api/research/jobs/:id` 端點（含忙碌 409、10 分鐘超時、OOM/缺模型錯誤狀態保留）與前端 `ModelResearchCenter.tsx` 面板。
+4. 已通過驗證：
+   - `.\.venv\Scripts\python.exe -m pytest research/tests/test_model_research.py -v`（7 passed, 0 warnings）
+   - `node --experimental-strip-types --test apps/collector/test/modelResearch.test.ts apps/web/test/modelResearchPanel.test.ts`（passed）
+   - `npm.cmd run lint`（0 errors）
+   - `npm.cmd run build`（0 errors）
+
+## 審查重點
+1. 依據 `LIGHTGBM_KRONOS_IMPLEMENTATION_PLAN.md` 逐項核對：
+   - 資料與特徵：1m 聚合成 UTC 1h、排除未收盤 K 線、缺口不以前值填補、120/30/30 切分與跨切分未來標籤刪除、特徵因果性（僅用決策時已知資料）、至少 10 檔合格標的限制。
+   - 報酬與成本：單邊 5 bps 手續費 + 5 bps 滑價（雙邊 20 bps）、資金費率在 `(entry_time, exit_time]` 區間按多空方向扣減、缺資金費時排除於完整淨績效並報告缺失比例。
+   - 模型與評估：LightGBM 雙 Ranker 參數與 `NDCG@5` 選模、排名分數不轉稱勝率、多空衝突標示；Kronos 256 預測 4、`sample_count=5`、抽樣離散程度用詞、small 通過後才跑 base。
+   - Worker 與 API：`shell: false`、單一推論工作並行拒絕 409、POST 不下載/安裝/訓練、失敗或過期狀態不以舊結果冒充成功、現貨模式阻擋提示。
+2. 若發現具體邏輯缺陷、邊界漏洞或契約不符，直接進行最小範圍修正並通過對應測試與建置。若無缺陷可零修改並出具繁體中文審查報告。

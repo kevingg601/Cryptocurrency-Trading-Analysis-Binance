@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "models": {
+    "chronos2": {
+      "repo_id": "amazon/chronos-2",
+      "revision": "29ec3766d36d6f73f0696f85560a422f50e8498c",
+      "files": {
+        "config.json": "ef1143bfdc9c0376d9a056eefca46cb4b1ec3d0ffacd541ff56feb40fb708031",
+        "model.safetensors": "ddcda3c7508bf2528087723e98a20707cc04b7f370ae275a9fd88078ddba4f42"
+      }
+    },
+    "timesfm25": {
+      "repo_id": "google/timesfm-2.5-200m-transformers",
+      "revision": "5a9806b9b291fad9233b5249d88263f1846304d3",
+      "files": {
+        "config.json": "452ecae918f67b2e7d0f2892ab424d1876939e70d077db3708a4fe8ca03a7de5",
+        "model.safetensors": "b53f6d52114e2ad786890f3c4637ce05f580b7800d6e24401f88b398b76035ef"
+      }
+    }
+  }
+}

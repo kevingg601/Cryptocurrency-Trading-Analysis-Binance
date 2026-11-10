@@ -1,6 +1,6 @@
-import { formatCryptoPrice } from './utils.ts';
+import { formatCryptoPrice } from '../utils.ts';
 import { describeEntry, validateProtection } from './orderValidation.ts';
-import type { EntryObservation } from './orderValidation';
+import type { EntryObservation } from './orderValidation.ts';
 
 export interface TradeIndicatorSnapshot {
   rsi: number | null;

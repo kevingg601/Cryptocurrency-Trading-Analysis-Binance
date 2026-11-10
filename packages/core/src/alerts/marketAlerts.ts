@@ -1,5 +1,5 @@
-import type { AggregateTradeData, MarketType, TickerData } from './binance';
-import { formatCryptoPrice } from './utils.ts';
+import type { AggregateTradeData, MarketType, TickerData } from '../market/types.ts';
+import { formatCryptoPrice } from '../utils.ts';
 
 export type MarketAlertType = 'pump' | 'dump' | 'whale-buy' | 'whale-sell';
 

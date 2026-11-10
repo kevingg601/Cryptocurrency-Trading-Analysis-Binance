@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { connectMarketStreams } from '../src/services/marketStream.ts';
-import { AutoTradingEngine, defaultAutoTradingConfig } from '../src/services/autoTrading.ts';
+import { connectMarketStreams } from '../src/market/marketStream.ts';
+import { AutoTradingEngine, defaultAutoTradingConfig } from '../src/auto/autoTrading.ts';
 
 class Socket {
   static instances: Socket[] = [];

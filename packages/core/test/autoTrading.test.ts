@@ -3,13 +3,13 @@ import assert from 'node:assert/strict';
 import {
   AutoTradingEngine, calculateAutoEquity, calculateAutoMetrics, defaultAutoTradingConfig,
   floorAutoQuantity, idleAutoTradingSnapshot, isAutoTradingActive,
-} from '../src/services/autoTrading.ts';
-import type { AutoTradingConfig } from '../src/services/autoTrading.ts';
-import type { AutoFundingRecord, AutoSymbolRules } from '../src/services/autoTradingMarket.ts';
-import type { AggregateTradeData, MarketType } from '../src/services/binance.ts';
-import type { FollowPlan } from '../src/services/followPlans.ts';
-import type { MarketAlert } from '../src/services/marketAlerts.ts';
-import type { MarketTradeFrame } from '../src/services/marketEvents.ts';
+} from '../src/auto/autoTrading.ts';
+import type { AutoTradingConfig } from '../src/auto/autoTrading.ts';
+import type { AutoFundingRecord, AutoSymbolRules } from '../src/auto/autoTradingMarket.ts';
+import type { AggregateTradeData, MarketType } from '../src/market/binance.ts';
+import type { FollowPlan } from '../src/follow/followPlans.ts';
+import type { MarketAlert } from '../src/alerts/marketAlerts.ts';
+import type { MarketTradeFrame } from '../src/market/marketEvents.ts';
 
 const epoch = 1_800_000_000_000;
 const symbols = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'XRPUSDT'];

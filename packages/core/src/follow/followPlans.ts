@@ -1,7 +1,7 @@
-import type { AggregateTradeData, MarketType } from './binance';
-import type { MarketAlert } from './marketAlerts';
-import { formatCryptoPrice } from './utils.ts';
-import type { AutoTradingNotification } from './autoTrading';
+import type { AggregateTradeData, MarketType } from '../market/types.ts';
+import type { MarketAlert } from '../alerts/marketAlerts.ts';
+import { formatCryptoPrice } from '../utils.ts';
+import type { AutoTradingNotification } from '../auto/autoTrading.ts';
 
 export type FollowPlanState = 'WAIT_PULLBACK' | 'WAIT_CONFIRMATION' | 'CONFIRMED' | 'TP1' | 'TP2' | 'STOPPED' | 'INVALID' | 'MISSED' | 'EXPIRED';
 export interface FollowPlan {

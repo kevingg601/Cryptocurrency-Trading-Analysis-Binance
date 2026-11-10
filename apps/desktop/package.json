@@ -1,0 +1,27 @@
+{
+  "name": "@fadachi/desktop",
+  "version": "1.0.0",
+  "private": true,
+  "main": "main.cjs",
+  "scripts": {
+    "start": "electron main.cjs",
+    "dist": "powershell -NoProfile -ExecutionPolicy Bypass -File ../../scripts/package-ai-ab.ps1"
+  },
+  "build": {
+    "appId": "com.antigravity.crypto",
+    "productName": "AntigravityCrypto",
+    "directories": {
+      "output": "../../dist-desktop"
+    },
+    "win": {
+      "target": "portable"
+    },
+    "files": [
+      "main.cjs",
+      "preload.cjs",
+      "../web/dist/**/*",
+      "../collector/**/*",
+      "../../packages/core/**/*"
+    ]
+  }
+}

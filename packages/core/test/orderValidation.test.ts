@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { describeEntry, validatePaperOrder, validateProtection, paperLimitFillPrice } from '../src/services/orderValidation.ts';
-import { deriveSuggestedTradeLevels } from '../src/services/tradeLevels.ts';
+import { describeEntry, validatePaperOrder, validateProtection, paperLimitFillPrice } from '../src/orders/orderValidation.ts';
+import { deriveSuggestedTradeLevels } from '../src/orders/tradeLevels.ts';
 
 const screenshot = {
   rsi: 28.43, sma20: 0.03476, ema50: 0.03458,

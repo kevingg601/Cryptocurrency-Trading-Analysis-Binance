@@ -1,7 +1,7 @@
-import type { MarketType } from './binance';
-import type { FollowPlan } from './followPlans';
-import type { MarketTradeFrame } from './marketEvents';
-import type { AutoFundingRecord, AutoSymbolRules } from './autoTradingMarket';
+import type { MarketType } from '../market/types.ts';
+import type { FollowPlan } from '../follow/followPlans.ts';
+import type { MarketTradeFrame } from '../market/marketEvents.ts';
+import type { AutoFundingRecord, AutoSymbolRules } from './autoTradingMarket.ts';
 
 export type AutoTradingStatus = 'IDLE' | 'RUNNING' | 'PAUSED' | 'DRAINING' | 'COMPLETED' | 'INTERRUPTED';
 export interface AutoTradingConfig {

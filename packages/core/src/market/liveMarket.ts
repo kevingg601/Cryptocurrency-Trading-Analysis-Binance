@@ -1,4 +1,4 @@
-import type { KlineData, TickerData } from './binance.ts';
+import type { KlineData, TickerData } from './types.ts';
 
 export type QuoteUpdate = Partial<TickerData> & { symbol: string };
 

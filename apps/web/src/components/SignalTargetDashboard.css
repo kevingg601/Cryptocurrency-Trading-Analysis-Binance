@@ -1,0 +1,744 @@
+/* ==========================================================================
+   Signal Target Dashboard (點位監控儀表板)
+   ========================================================================== */
+
+.signal-dashboard {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  width: 100%;
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 8px 4px 32px;
+  color: var(--text-primary);
+  font-family: var(--font-display, inherit);
+}
+
+/* Header & Controls */
+.signal-dashboard-header {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 14px;
+  padding: 18px 24px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.03);
+}
+
+.signal-dashboard-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.signal-dashboard-title-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.signal-dashboard-title-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  border-radius: 10px;
+  background: rgba(37, 99, 235, 0.1);
+  color: var(--primary, #2563eb);
+}
+
+.signal-dashboard-title-left h2 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 800;
+  letter-spacing: -0.3px;
+}
+
+.signal-dashboard-title-left p {
+  margin: 2px 0 0;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.signal-dashboard-metrics {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.signal-metric-pill {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  padding: 6px 14px;
+  border-radius: 20px;
+  font-size: 13px;
+}
+
+.signal-metric-pill span {
+  color: var(--text-secondary);
+}
+
+.signal-metric-pill strong {
+  font-weight: 700;
+}
+
+/* Toolbar & Filters */
+.signal-dashboard-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  border-top: 1px solid var(--border-color);
+  padding-top: 14px;
+}
+
+.signal-filter-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.signal-filter-tabs {
+  display: inline-flex;
+  background: var(--bg-secondary);
+  padding: 3px;
+  border-radius: 8px;
+  border: 1px solid var(--border-color);
+}
+
+.signal-filter-tab {
+  background: transparent;
+  border: none;
+  padding: 6px 14px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.signal-filter-tab:hover {
+  color: var(--text-primary);
+}
+
+.signal-filter-tab.active {
+  background: var(--bg-card);
+  color: var(--text-primary);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+
+.signal-search-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.signal-search-input {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 6px 12px 6px 32px;
+  font-size: 13px;
+  color: var(--text-primary);
+  width: 170px;
+  outline: none;
+  transition: border-color 0.15s ease;
+}
+
+.signal-search-input:focus {
+  border-color: var(--primary, #2563eb);
+}
+
+.signal-search-icon {
+  position: absolute;
+  left: 10px;
+  color: var(--text-secondary);
+  pointer-events: none;
+}
+
+.signal-add-coin-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 6px 12px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.signal-add-coin-btn:hover {
+  background: var(--primary, #2563eb);
+  color: #fff;
+  border-color: var(--primary, #2563eb);
+}
+
+/* Cards Container */
+.signal-cards-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* Individual Signal Card */
+.signal-target-card {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: #ffffff;
+  border: 1px solid #eef2f6;
+  border-radius: 14px;
+  padding: 20px 24px;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.03);
+  transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
+  user-select: none;
+}
+
+.signal-target-card:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.06);
+  border-color: #cbd5e1;
+}
+
+/* Dark Theme Overrides */
+.dark-theme .signal-target-card {
+  background: var(--bg-card, #1a202c);
+  border: 1px solid var(--border-color, rgba(255, 255, 255, 0.08));
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.2);
+}
+
+.dark-theme .signal-target-card:hover {
+  border-color: rgba(255, 255, 255, 0.18);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+}
+
+/* Card Left Section */
+.signal-card-left {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 130px;
+  flex-shrink: 0;
+}
+
+.signal-card-symbol-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.signal-card-symbol {
+  font-size: 22px;
+  font-weight: 800;
+  letter-spacing: -0.4px;
+  color: #0f172a;
+}
+
+.dark-theme .signal-card-symbol {
+  color: #f8fafc;
+}
+
+.signal-card-star {
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  padding: 0;
+  color: #cbd5e1;
+  display: inline-flex;
+  align-items: center;
+  transition: color 0.15s ease;
+}
+
+.signal-card-star:hover,
+.signal-card-star.active {
+  color: #eab308;
+}
+
+.signal-card-subline {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #64748b;
+  font-variant-numeric: tabular-nums;
+}
+
+.dark-theme .signal-card-subline {
+  color: #94a3b8;
+}
+
+.signal-card-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 4px;
+  color: #ffffff;
+  line-height: 1.4;
+}
+
+.signal-card-badge.short {
+  background: #c94b4b;
+}
+
+.signal-card-badge.long {
+  background: #1b7a4d;
+}
+
+.signal-card-distance {
+  font-size: 12px;
+  color: #64748b;
+  margin-top: 2px;
+}
+
+.dark-theme .signal-card-distance {
+  color: #94a3b8;
+}
+
+/* Center Progress Track */
+.signal-card-track-container {
+  position: relative;
+  flex: 1 1 auto;
+  margin: 0 32px;
+  height: 80px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+/* Track Top Row (Labels & Marker) */
+.signal-track-top-row {
+  position: relative;
+  height: 22px;
+  width: 100%;
+}
+
+.signal-track-top-label {
+  position: absolute;
+  top: 0;
+  transform: translateX(-50%);
+  font-size: 12px;
+  color: #64748b;
+  white-space: nowrap;
+}
+
+.dark-theme .signal-track-top-label {
+  color: #94a3b8;
+}
+
+/* Current Price Pin Indicator */
+.signal-track-pin {
+  position: absolute;
+  top: -4px;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  z-index: 5;
+  pointer-events: none;
+}
+
+.signal-track-pin-label {
+  font-size: 11px;
+  font-weight: 800;
+  color: #0f172a;
+  background: rgba(255, 255, 255, 0.9);
+  padding: 0 3px;
+  border-radius: 2px;
+  margin-bottom: 2px;
+}
+
+.dark-theme .signal-track-pin-label {
+  color: #f8fafc;
+  background: rgba(15, 23, 42, 0.85);
+}
+
+.signal-track-pin-line {
+  width: 2px;
+  height: 28px;
+  background: #0f172a;
+  border-radius: 1px;
+}
+
+.dark-theme .signal-track-pin-line {
+  background: #f8fafc;
+}
+
+/* Track Middle Row (Bar & Ticks) */
+.signal-track-bar-row {
+  position: relative;
+  height: 18px;
+  width: 100%;
+  display: flex;
+  align-items: center;
+}
+
+/* Background base line from 20% to 95% */
+.signal-track-base-line {
+  position: absolute;
+  left: 20%;
+  width: 75%;
+  height: 4px;
+  background: #e2efe6;
+  border-radius: 2px;
+  z-index: 1;
+}
+
+.dark-theme .signal-track-base-line {
+  background: rgba(27, 122, 77, 0.25);
+}
+
+/* Danger zone (SL to Entry: 5% to 20%) */
+.signal-track-danger-segment {
+  position: absolute;
+  left: 5%;
+  width: 15%;
+  height: 4px;
+  background: #fce8e6;
+  border-radius: 2px 0 0 2px;
+  z-index: 1;
+}
+
+.dark-theme .signal-track-danger-segment {
+  background: rgba(239, 68, 68, 0.25);
+}
+
+/* Fill bar (Green for profit from 20% to currentPosition) */
+.signal-track-fill-bar {
+  position: absolute;
+  height: 4px;
+  background: #1b7a4d;
+  border-radius: 2px;
+  z-index: 2;
+  transition: width 0.3s ease, left 0.3s ease;
+}
+
+.signal-track-fill-bar.drawdown {
+  background: #dc2626;
+}
+
+/* Vertical tick marks */
+.signal-track-tick {
+  position: absolute;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 2px;
+  height: 14px;
+  background: #64748b;
+  z-index: 3;
+}
+
+.dark-theme .signal-track-tick {
+  background: #94a3b8;
+}
+
+.signal-track-tick.sl {
+  background: #c94b4b;
+  height: 14px;
+}
+
+.signal-track-tick.entry {
+  background: #334155;
+  height: 16px;
+}
+
+.dark-theme .signal-track-tick.entry {
+  background: #cbd5e1;
+}
+
+.signal-track-tick.tp {
+  background: #64748b;
+  height: 14px;
+}
+
+.signal-track-tick.tp.reached,
+.signal-track-tick.ftp.reached {
+  background: #1b7a4d;
+}
+
+.signal-track-tick.ftp {
+  background: #64748b;
+  height: 14px;
+}
+
+/* Bottom Row (Names and Prices) */
+.signal-track-bottom-row {
+  position: relative;
+  height: 32px;
+  width: 100%;
+  margin-top: 2px;
+}
+
+.signal-track-bottom-item {
+  position: absolute;
+  top: 0;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.signal-track-bottom-name {
+  color: #64748b;
+  font-weight: 500;
+  line-height: 1.2;
+}
+
+.dark-theme .signal-track-bottom-name {
+  color: #94a3b8;
+}
+
+.signal-track-bottom-price {
+  color: #334155;
+  font-weight: 600;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  margin-top: 2px;
+}
+
+.dark-theme .signal-track-bottom-price {
+  color: #cbd5e1;
+}
+
+/* When milestone is reached -> Green highlight */
+.signal-track-bottom-item.reached .signal-track-bottom-name,
+.signal-track-bottom-item.reached .signal-track-bottom-price {
+  color: #1b7a4d;
+  font-weight: 700;
+}
+
+/* Right Section */
+.signal-card-right {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  text-align: right;
+  min-width: 180px;
+  flex-shrink: 0;
+}
+
+.signal-card-pnl {
+  font-size: 28px;
+  font-weight: 800;
+  letter-spacing: -0.5px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.1;
+}
+
+.signal-card-pnl.positive {
+  color: #1b7a4d;
+}
+
+.signal-card-pnl.negative {
+  color: #dc2626;
+}
+
+.signal-card-status {
+  font-size: 12px;
+  color: #64748b;
+  margin-top: 4px;
+  font-variant-numeric: tabular-nums;
+}
+
+.dark-theme .signal-card-status {
+  color: #94a3b8;
+}
+
+.signal-card-status-label {
+  font-size: 12px;
+  color: #64748b;
+  margin-top: 4px;
+  line-height: 1.3;
+}
+
+.dark-theme .signal-card-status-label {
+  color: #94a3b8;
+}
+
+.signal-card-status-price {
+  font-size: 13px;
+  font-weight: 700;
+  color: #334155;
+  font-variant-numeric: tabular-nums;
+  margin-top: 2px;
+  line-height: 1.2;
+}
+
+.dark-theme .signal-card-status-price {
+  color: #cbd5e1;
+}
+
+/* Action hover buttons */
+.signal-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.signal-card-action-btn {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  padding: 3px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.signal-card-action-btn:hover {
+  background: var(--primary, #2563eb);
+  color: #fff;
+  border-color: var(--primary, #2563eb);
+}
+
+/* Edit Modal */
+.signal-edit-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  backdrop-filter: blur(2px);
+}
+
+.signal-edit-modal {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 14px;
+  padding: 24px;
+  width: 90%;
+  max-width: 480px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+}
+
+.signal-edit-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 20px;
+}
+
+.signal-edit-modal-header h3 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.signal-edit-modal-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.signal-edit-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.signal-edit-field label {
+  font-size: 13px;
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+
+.signal-edit-field input,
+.signal-edit-field select {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 14px;
+  color: var(--text-primary);
+  outline: none;
+}
+
+.signal-edit-field input:focus,
+.signal-edit-field select:focus {
+  border-color: var(--primary, #2563eb);
+}
+
+.signal-edit-modal-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 24px;
+}
+
+.signal-modal-btn {
+  padding: 8px 16px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  border: 1px solid var(--border-color);
+}
+
+.signal-modal-btn.primary {
+  background: var(--primary, #2563eb);
+  color: #fff;
+  border-color: var(--primary, #2563eb);
+}
+
+.signal-modal-btn.secondary {
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+}
+
+/* Responsive Scaling */
+@media (max-width: 1024px) {
+  .signal-target-card {
+    flex-wrap: wrap;
+    gap: 16px;
+  }
+
+  .signal-card-track-container {
+    order: 3;
+    width: 100%;
+    margin: 12px 0 0;
+  }
+}
+
+@media (max-width: 640px) {
+  .signal-target-card {
+    padding: 16px;
+  }
+
+  .signal-card-symbol {
+    font-size: 18px;
+  }
+
+  .signal-card-pnl {
+    font-size: 22px;
+  }
+
+  .signal-track-bottom-price {
+    font-size: 9px;
+  }
+}

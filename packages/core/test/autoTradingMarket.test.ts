@@ -1,14 +1,14 @@
 import test from 'node:test';
 import type { TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { idleAutoTradingSnapshot } from '../src/services/autoTrading.ts';
-import type { AutoTradingSnapshot } from '../src/services/autoTrading.ts';
-import type { FollowPlan } from '../src/services/followPlans.ts';
+import { idleAutoTradingSnapshot } from '../src/auto/autoTrading.ts';
+import type { AutoTradingSnapshot } from '../src/auto/autoTrading.ts';
+import type { FollowPlan } from '../src/follow/followPlans.ts';
 import {
   fetchAutoFundingHistory, fetchAutoServerTime, fetchAutoSymbolRules,
   parseAutoFundingHistory, parseAutoSymbolRules,
-} from '../src/services/autoTradingMarket.ts';
-import { loadAutoTradingBatches, saveAutoTradingBatch } from '../src/services/autoTradingStorage.ts';
+} from '../src/auto/autoTradingMarket.ts';
+import { loadAutoTradingBatches, saveAutoTradingBatch } from '../src/auto/autoTradingStorage.ts';
 
 const lot = { filterType: 'LOT_SIZE', minQty: '0.001', maxQty: '100', stepSize: '0.001' };
 const marketLot = { filterType: 'MARKET_LOT_SIZE', minQty: '0.01', maxQty: '10', stepSize: '0.01' };

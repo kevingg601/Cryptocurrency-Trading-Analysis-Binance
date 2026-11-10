@@ -1,0 +1,38 @@
+﻿
+> fadachi@0.0.0 build
+> npm run build -w packages/core && npm run build -w apps/collector && npm run build -w apps/web
+
+
+> @fadachi/core@1.0.0 build
+> tsc -p tsconfig.json
+
+
+> @fadachi/collector@1.0.0 build
+> tsc -p tsconfig.json
+
+
+> @fadachi/web@1.0.0 build
+> tsc -b && vite build
+
+vite v8.0.14 building client environment for production...
+[2K
+transforming...✓ 1804 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/index.html                         1.01 kB │ gzip:   0.58 kB
+dist/assets/AutoTrading-Cd-jRawO.css   10.98 kB │ gzip:   2.56 kB
+dist/assets/index-C9D8WqwD.css         60.58 kB │ gzip:  11.01 kB
+dist/assets/history-BqSBtyWS.js         0.22 kB │ gzip:   0.18 kB
+dist/assets/EquityChart-Dh4XeHW6.js     1.54 kB │ gzip:   0.91 kB
+dist/assets/Cockpit-B9474kDK.js         6.02 kB │ gzip:   2.05 kB
+dist/assets/Portfolio-3PXc9ANE.js       7.19 kB │ gzip:   2.41 kB
+dist/assets/AutoBotLab-X44QmZNs.js     12.78 kB │ gzip:   4.77 kB
+dist/assets/AutoTrading-awuIKZ1o.js    29.36 kB │ gzip:   8.99 kB
+dist/assets/index-Cr0Z4qdO.js         557.74 kB │ gzip: 173.26 kB
+
+✓ built in 411ms
+[plugin builtin:vite-reporter] 
+(!) Some chunks are larger than 500 kB after minification. Consider:
+- Using dynamic import() to code-split the application
+- Use build.rolldownOptions.output.codeSplitting to improve chunking: https://rolldown.rs/reference/OutputOptions.codeSplitting
+- Adjust chunk size limit for this warning via build.chunkSizeWarningLimit.

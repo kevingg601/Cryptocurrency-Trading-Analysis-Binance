@@ -1,4 +1,4 @@
-import type { MarketType, WsConnection } from './binance.ts';
+import type { MarketType, WsConnection } from './types.ts';
 
 export type StreamStatus = 'connecting' | 'connected' | 'stale' | 'disconnected';
 export interface StreamHealth { lastValidAt: number; interruptedSince?: number }

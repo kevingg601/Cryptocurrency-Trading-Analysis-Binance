@@ -1,4 +1,4 @@
-import type { FollowPlan } from './followPlans';
+import type { FollowPlan } from './followPlans.ts';
 import { isFollowPlanActive } from './followPlans.ts';
 
 export function followPlanLines(plan: FollowPlan) {

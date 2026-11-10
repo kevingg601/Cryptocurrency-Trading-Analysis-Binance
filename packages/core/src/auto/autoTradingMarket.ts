@@ -1,4 +1,4 @@
-import type { MarketType } from './binance';
+import type { MarketType } from '../market/types.ts';
 
 export interface AutoSymbolRules {
   stepSize: number;

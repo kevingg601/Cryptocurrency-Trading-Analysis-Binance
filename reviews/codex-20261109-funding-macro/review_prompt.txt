@@ -1,0 +1,60 @@
+# 第二輪 Codex 審查與修正任務契約：資金費率 Z-Score 與大週期趨勢 (4h/24h) 特徵升級
+
+## 任務背景與角色
+你是 Antigravity 完成第一輪實作後的第二輪審查與修正執行端，直接處理已交接的工作。不要重新啟動第一輪、planner、Boost 或其他代理，不呼叫 `agy`、本 Skill、其他 AI CLI 或外部 AI，避免遞迴委派。
+
+目標工作專案路徑：`D:\PYTHON\fadachi`。
+原需求：針對使用者對模型方向命中率的回饋，執行「2. 將資金費率異常（Funding Rate Z-Score）與大週期趨勢（4h/24h）加入特徵」，重構特徵、重訓多空 LGBMRanker、更新評估報告與最新推論。
+
+## 適用的規範與禁止事項
+1. 閱讀適用的 `AGENTS.md`。若存在與本次使用者明確授權相衝突的舊主控／只讀 reviewer 流程，依本次審查並修正的授權執行，同時保留其他安全、資料與工作區規範；不修改規範檔來解除限制。無法釐清授權時先回報。
+2. 嚴格工作區邊界與虛擬環境隔離：
+   - 所有讀寫與執行必須封閉在 `D:\PYTHON\fadachi` 之內，嚴禁跨出此專案目錄。
+   - Python 指令必須使用當前工作區專屬虛擬環境：`D:\PYTHON\fadachi\.venv\Scripts\python.exe`。
+3. 嚴禁瀏覽器與桌面 UI 操作：禁止瀏覽器與桌面 UI 操作、預覽、截圖、DOM 擷取、互動及視覺驗證；禁止 CUA、Playwright、Puppeteer、Selenium、CDP 與無頭瀏覽器，不經由 shell 或其他代理繞過，也不安裝或下載瀏覽器。
+4. 可唯讀查閱必要依賴，只能寫入明確允許的檔案。獨立檢查邏輯、邊界條件、型別、例外、相容性與回歸；直接修正有依據的缺陷，保留正確成果，不做無關重構、擴充功能或為了產生第二版而重寫。沒有缺陷可零修改。
+5. 不覆蓋使用者或其他代理未交接的修改，不刪除資料、不覆寫模型或結果，不修改機密及全域設定。遵守專案資料切分與前處理規範，不啟動未授權的長時間訓練、下載或部署。需擴大範圍或改變介面時回報 Antigravity，由其取得必要決策。
+6. 只執行變更相關的語法、型別、lint、建置及不啟動瀏覽器的必要測試。在 Windows PowerShell 下執行命令請使用 `.\.venv\Scripts\python.exe -m pytest research/tests/test_model_research.py`、`npm.cmd test`、`npm.cmd run lint`、`npm.cmd run build`。會啟動瀏覽器的部分略過並回報。必要檢查通過後，不重跑無新疑慮的完整測試。
+7. 以繁體中文回報具體問題、嚴重度、檔案位置、觸發條件、修正理由、指令結果及未驗證事項。涉及前端時註明「依使用者要求，未進行瀏覽器、畫面與互動驗證」。
+
+## 可修改檔案範圍
+- `research/model_research/**`
+- `research/tests/test_model_research.py`
+- `packages/core/src/research/**`
+- `apps/collector/src/research/**`
+- `apps/web/src/components/ModelResearchCenter.tsx`
+- `apps/web/src/components/ModelResearchCenter.css`
+- `apps/web/test/modelResearchPanel.test.ts`
+- 若有修改前端或 collector/core 程式碼，請執行 `npm.cmd run build` 確保建置產物同步。
+
+## 禁止修改範圍
+- `reviews/**`（輸出目錄，排除於受審範圍）
+- `data/model-research/weights/**`（已下載的 Kronos 模型權重）
+- 其他無關模組（如舊有 A/B 交易與點位儀表板）
+- 不要自動 commit、stash、reset、checkout、clean 或刪檔。
+
+## 第一輪變更摘要
+1. 在 `features_and_labels.py` 中將特徵回顧窗口由 72h 擴展至 96h，並新增 13 項因果特徵（總特徵數達 30 項）：
+   - 資金費率異常與擁擠度：`funding_rate_latest`、`funding_rate_zscore_7d`（7 天滑動窗口 Z-Score）、`funding_rate_diff`、截面排名 `cs_rank_funding_zscore_7d`。
+   - 4h 大週期趨勢：`trend_4h_sma6_dist`、`trend_4h_slope`。
+   - 24h 大週期趨勢與震盪區間：`trend_24h_sma4_dist`、`trend_24h_slope`、`close_pos_24h`、`amplitude_24h`。
+   - 長週期報酬：`ret_48h`、`ret_72h`、`cs_rank_ret_72h`。
+2. 嚴格因果防洩漏：`funding_time <= decision_time`，毫秒級防偷看未來資金費。
+3. `lightgbm_ranker.py` 訓練邏輯加入 `MIN_BOOST_ROUNDS = 10` 防早停死鎖單棵樹；`worker.py` 在推論時載入歷史資金費率計算 Z-Score。
+4. TypeScript 型別在 `ResearchRankingEntry` 新增資金費與趨勢欄位，前端 `ModelResearchCenter.tsx` 多空 Top 5 表格同步渲染。
+5. 通過之驗證：
+   - `.\.venv\Scripts\python.exe -m pytest research/tests/test_model_research.py -v`（15 passed, 0 warnings）
+   - `npm.cmd test`（301 passed, 0 failed）
+   - `npm.cmd run lint`（0 errors）
+   - `npm.cmd run build`（0 errors）
+
+## 審查重點
+1. 請審查新特徵的因果性（Causality）：
+   - 資金費率 Z-Score 的取值範圍是否嚴格受限於 `funding_time <= decision_time`（`decision_time = open_time + 1h`）？當交易所推送時間有微小抖動時（例如 `funding_time = decision_time + 1ms`），是否會被嚴格排除？
+   - 4h 與 24h 的趨勢與均線計算是否只使用已收盤小時 K 線？
+2. 缺失值處理：
+   - 當某幣種資金費率資料缺失或筆數少於 6 筆時，是否能安全以 NaN 處理並由 LightGBM 預設分支吞吐，而不導致推論報錯中斷？
+3. 前後端型別與序列化相容性：
+   - 新欄位 `fundingRateLatest`、`fundingRateZScore7d` 等是否為 optional，在無資金費時是否不會引起前端渲染崩潰？
+4. 若發現實質缺陷或邊界漏洞，直接進行最小範圍的精準修正，並執行必要的測試及建置確認。
+5. 若無缺陷，請給予零修改並出具繁體中文審查報告。

@@ -1,4 +1,4 @@
-import type { AutoEquityPoint, AutoTradingSnapshot } from './autoTrading';
+import type { AutoEquityPoint, AutoTradingSnapshot } from './autoTrading.ts';
 
 const DATABASE = 'crypto-auto-trading';
 const STORE = 'batches';

@@ -1,0 +1,244 @@
+"""Prepare isolated, pinned environments and model snapshots for the benchmark."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import Any
+
+from . import config
+from .common import exclusive_lock
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+BENCHMARK_ROOT = Path(__file__).resolve().parent
+ENV_ROOT = PROJECT_ROOT / ".benchmark-envs"
+CACHE_ROOT = PROJECT_ROOT / ".benchmark-cache"
+ASSET_LOCK = BENCHMARK_ROOT / "model-assets.lock.json"
+ENV_REQUIREMENTS = {
+    "rank": BENCHMARK_ROOT / "requirements-rank.txt",
+    "chronos": BENCHMARK_ROOT / "requirements-chronos.txt",
+    "timesfm": BENCHMARK_ROOT / "requirements-timesfm.txt",
+}
+ENV_LOCKS = {
+    "rank": BENCHMARK_ROOT / "requirements-rank.lock.txt",
+    "chronos": BENCHMARK_ROOT / "requirements-chronos.lock.txt",
+    "timesfm": BENCHMARK_ROOT / "requirements-timesfm.lock.txt",
+}
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _python_path(name: str) -> Path:
+    return ENV_ROOT / name / "Scripts" / "python.exe"
+
+
+def _write_json(path: Path, value: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_suffix(path.suffix + ".tmp")
+    temp_path.write_text(json.dumps(value, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    temp_path.replace(path)
+
+
+def _prepare_env(name: str, *, force: bool = False) -> dict[str, Any]:
+    env_dir = ENV_ROOT / name
+    python = _python_path(name)
+    requirement = ENV_REQUIREMENTS[name]
+    lock = ENV_LOCKS[name]
+    result: dict[str, Any] = {
+        "name": name,
+        "python": str(python),
+        "requirements": str(requirement),
+        "lock": str(lock),
+        "status": "failed",
+    }
+    try:
+        task_tmp = PROJECT_ROOT / ".benchmark-tmp"
+        task_tmp.mkdir(parents=True, exist_ok=True)
+        env = os.environ.copy()
+        env["TEMP"] = str(task_tmp)
+        env["TMP"] = str(task_tmp)
+        if not python.exists():
+            env_dir.parent.mkdir(parents=True, exist_ok=True)
+            subprocess.run([sys.executable, "-m", "venv", str(env_dir)], check=True, env=env)
+        if not python.exists():
+            raise RuntimeError(f"隔離環境未建立 Python：{python}")
+
+        if not lock.is_file():
+            raise FileNotFoundError(f"預先解析的精確環境鎖檔不存在：{lock}")
+        install_file = lock
+        env["HF_HOME"] = str(CACHE_ROOT / "hf")
+        env["HF_HUB_CACHE"] = str(CACHE_ROOT / "hf" / "hub")
+        env["PIP_CACHE_DIR"] = str(CACHE_ROOT / "pip")
+        env["TORCH_HOME"] = str(CACHE_ROOT / "torch")
+        env["CUDA_CACHE_PATH"] = str(CACHE_ROOT / "cuda")
+        env["HF_HUB_DISABLE_TELEMETRY"] = "1"
+        env["PYTHONUTF8"] = "1"
+        pip_cmd = [str(python), "-m", "pip", "install", "--disable-pip-version-check"]
+        if name in {"chronos", "timesfm"}:
+            pip_cmd.extend(["--extra-index-url", "https://download.pytorch.org/whl/cu126"])
+        pip_cmd.extend(["-r", str(install_file)])
+        last_error = None
+        for attempt in range(1, 4):
+            try:
+                subprocess.run(pip_cmd, cwd=PROJECT_ROOT, env=env, check=True)
+                last_error = None
+                break
+            except subprocess.CalledProcessError as exc:
+                last_error = exc
+                if attempt < 3:
+                    time.sleep(min(2 ** (attempt - 1), 8))
+        if last_error is not None:
+            raise last_error
+        version = subprocess.run(
+            [str(python), "--version"], check=True, capture_output=True, text=True, encoding="utf-8"
+        ).stdout.strip()
+        env_lock = env_dir / "requirements.lock"
+        env_lock.write_bytes(lock.read_bytes())
+        result.update(status="ready", python_version=version, lock_sha256=_sha256(lock))
+    except Exception as exc:  # preserve each environment result and continue other models
+        result["error"] = f"{type(exc).__name__}: {exc}"
+    _write_json(env_dir / "environment-manifest.json", result)
+    return result
+
+
+def _download_models(*, retries: int = 3) -> dict[str, Any]:
+    try:
+        from huggingface_hub import hf_hub_download
+    except Exception as exc:
+        return {"status": "failed", "error": f"huggingface_hub import failed: {exc}"}
+
+    lock = json.loads(ASSET_LOCK.read_text(encoding="utf-8"))
+    model_results: dict[str, Any] = {}
+    for key, model in lock["models"].items():
+        model_dir = CACHE_ROOT / "models" / key
+        model_dir.mkdir(parents=True, exist_ok=True)
+        files: dict[str, Any] = {}
+        for filename, expected_hash in model["files"].items():
+            target = model_dir / filename
+            error = None
+            for attempt in range(1, retries + 1):
+                try:
+                    source = Path(
+                        hf_hub_download(
+                            repo_id=model["repo_id"],
+                            filename=filename,
+                            revision=model["revision"],
+                            cache_dir=str(CACHE_ROOT / "hf"),
+                            local_dir=str(model_dir),
+                            force_download=False,
+                        )
+                    )
+                    actual_hash = _sha256(source)
+                    if actual_hash.lower() != expected_hash.lower():
+                        raise ValueError(f"SHA-256 mismatch for {filename}: expected {expected_hash}, got {actual_hash}")
+                    target = source
+                    files[filename] = {"status": "ready", "path": str(target), "sha256": actual_hash}
+                    error = None
+                    break
+                except Exception as exc:
+                    error = f"{type(exc).__name__}: {exc}"
+                    if attempt < retries:
+                        time.sleep(min(2 ** (attempt - 1), 8))
+            if error:
+                files[filename] = {"status": "failed", "error": error}
+        status = "ready" if all(v["status"] == "ready" for v in files.values()) else "failed"
+        model_results[key] = {
+            "status": status,
+            "repo_id": model["repo_id"],
+            "revision": model["revision"],
+            "files": files,
+            "local_dir": str(model_dir),
+        }
+    return {"status": "ready" if all(m["status"] == "ready" for m in model_results.values()) else "partial", "models": model_results}
+
+
+def prepare(*, force: bool = False, manifest_path: Path | None = None) -> dict[str, Any]:
+    owner_lock = config.RUNS_ROOT.parent / ".benchmark-owner.lock"
+    with exclusive_lock(owner_lock):
+        return _prepare_locked(force=force, manifest_path=manifest_path)
+
+
+def _prepare_locked(*, force: bool = False, manifest_path: Path | None = None) -> dict[str, Any]:
+    ENV_ROOT.mkdir(parents=True, exist_ok=True)
+    CACHE_ROOT.mkdir(parents=True, exist_ok=True)
+    env_results: dict[str, Any] = {}
+    # One setup failure must not prevent setup attempts for later environments.
+    for name in ("rank", "chronos", "timesfm"):
+        env_results[name] = _prepare_env(name, force=force)
+    # The rank env owns the shared Hugging Face downloader dependency too, but
+    # asset preparation only runs once one of the TS envs has the library.
+    downloader = next((n for n in ("chronos", "timesfm") if env_results[n]["status"] == "ready"), None)
+    if downloader:
+        python = _python_path(downloader)
+        # Download via the environment interpreter to honor its exact hub version.
+        helper = subprocess.run(
+            [str(python), "-c", "from research.model_benchmark.bootstrap import _download_models; import json; print(json.dumps(_download_models()))"],
+            cwd=PROJECT_ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            env={**os.environ, "HF_HOME": str(CACHE_ROOT / "hf"), "HF_HUB_CACHE": str(CACHE_ROOT / "hf" / "hub")},
+        )
+        if helper.returncode == 0:
+            try:
+                asset_results = json.loads(helper.stdout.strip().splitlines()[-1])
+            except Exception as exc:
+                asset_results = {"status": "failed", "error": f"Invalid download status JSON: {exc}", "stdout": helper.stdout[-2000:]}
+        else:
+            asset_results = {"status": "failed", "error": helper.stderr[-3000:]}
+    else:
+        asset_results = {"status": "failed", "error": "No TimesFM/Chronos environment is ready to download assets."}
+
+    for key in ("chronos2", "timesfm25"):
+        env_name = "chronos" if key == "chronos2" else "timesfm"
+        manifest = {
+            **env_results[env_name],
+            "model": asset_results.get("models", {}).get(key, {"status": "not_downloaded"}),
+        }
+        _write_json(ENV_ROOT / env_name / "environment-manifest.json", manifest)
+        model = manifest["model"]
+        _write_json(
+            ENV_ROOT / env_name / "model-revision.json",
+            {
+                "repo_id": model.get("repo_id"), "revision": model.get("revision"),
+                "status": model.get("status"), "files": model.get("files", {}),
+                "local_dir": model.get("local_dir"),
+            },
+        )
+    result: dict[str, Any] = {
+        "status": "ready" if all(e["status"] == "ready" for e in env_results.values()) and asset_results["status"] == "ready" else "partial",
+        "environments": env_results,
+        "assets": asset_results,
+    }
+    if manifest_path:
+        _write_json(manifest_path, result)
+    return result
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--prepare", action="store_true", help="prepare all isolated environments and pinned model snapshots")
+    parser.add_argument("--manifest", type=Path, help="write the combined status JSON to this path")
+    parser.add_argument("--force", action="store_true", help="reserved; environment locks remain immutable")
+    args = parser.parse_args()
+    if not args.prepare:
+        parser.error("specify --prepare")
+    result = prepare(force=args.force, manifest_path=args.manifest)
+    print(json.dumps(result, indent=2, ensure_ascii=False))
+    return 0 if result["status"] == "ready" else 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
