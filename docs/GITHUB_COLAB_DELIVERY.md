@@ -25,3 +25,10 @@
 依使用者要求，未進行瀏覽器、畫面與互動驗證。真實Colab登入、Secrets授權、Drive掛載及T4模型執行，仍需使用者按操作指南手動確認；本機mock或CPU檢查不作為這些驗收的替代。
 
 已確認原遠端由GitHub重新導向同一儲存庫的新名稱：`kevingg601/Cryptocurrency-Trading-Analysis-Binance`。入口與本機origin改用該正式網址，未建立新庫或改變可見性。乾淨的Git暫存內容匯出目錄已成功載入研究模組；待提交檔案未含資料、權重或訓練結果。
+
+
+## Drive下載快取更新
+
+新增drive_cache.py，保存固定Python安裝包、完整wheel集合及官方模型權重；安裝好的venv留在/content。快取由鎖定檔＋平台識別，與程式commit分離。先完成ZIP與SHA256核對再發布索引；不備份未完成下載，不覆寫資料或模型成果。完整wheels以離線方式安裝，已核對官方權重不再呼叫下載。
+
+本次僅跑4個小型離線快取測試（0.90秒）：保存／還原、未變內容不重複上傳、不含venv／未完成檔、損壞hash拒絕、wheel命中不啟動網路、版本key隔離；另完成變更程式與Notebook語法／生成一致性檢查。沒有實際下載套件／權重、訓練或使用Colab GPU，真實Drive與Linux離線安裝仍待執行確認。

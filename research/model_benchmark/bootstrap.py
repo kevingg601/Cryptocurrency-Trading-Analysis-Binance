@@ -93,6 +93,38 @@ def _portable_path(path: Path) -> str:
         return path.name
 
 
+def _prepare_wheels(name: str, lock: Path, env: dict[str, str]) -> Path:
+    """Resolve/download once, then install the exact saved wheel set offline."""
+    directory = CACHE_ROOT / "wheels" / f"{name}-{_sha256(lock)[:16]}"
+    marker = directory / "wheel-manifest.json"
+    if marker.is_file():
+        saved = json.loads(marker.read_text(encoding="utf-8"))
+        records = saved.get("files", {})
+        if saved.get("lock_sha256") == _sha256(lock) and records and all(
+            Path(filename).name == filename and filename.endswith(".whl") and
+            (directory / filename).is_file() and _sha256(directory / filename) == digest
+            for filename, digest in records.items()
+        ):
+            print(f"Verified wheel cache: {name}; no package downloads", flush=True)
+            return directory
+    directory.mkdir(parents=True, exist_ok=True)
+    command = [sys.executable, "-m", "pip", "download", "--disable-pip-version-check",
+               "--only-binary=:all:", "--dest", str(directory), "-r", str(lock), "pip==25.1.1"]
+    for attempt in range(3):
+        try:
+            subprocess.run(command, cwd=PROJECT_ROOT, env=env, check=True)
+            break
+        except subprocess.CalledProcessError:
+            if attempt == 2:
+                raise
+            time.sleep(2 ** attempt)
+    records = {path.name: _sha256(path) for path in directory.glob("*.whl")}
+    if not records:
+        raise RuntimeError("download did not produce wheel files")
+    _write_json(marker, {"lock_sha256": _sha256(lock), "files": records})
+    return directory
+
+
 def _prepare_env(name: str, *, force: bool = False) -> dict[str, Any]:
     env_dir = ENV_ROOT / name
     python = _python_path(name)
@@ -132,13 +164,15 @@ def _prepare_env(name: str, *, force: bool = False) -> dict[str, Any]:
         env["HF_HUB_DISABLE_TELEMETRY"] = "1"
         env["PYTHONUTF8"] = "1"
         if sys.platform.startswith("linux"):
+            wheels = _prepare_wheels(name, lock, env)
+            offline = ["--no-index", "--find-links", str(wheels)]
             # Seed pip from the already working interpreter; hosted runtimes
             # sometimes omit ensurepip from their Python 3.12 installation.
             subprocess.run([sys.executable, "-m", "pip", "--python", str(python),
-                            "install", "--disable-pip-version-check", "pip==25.1.1"],
+                            "install", "--disable-pip-version-check", *offline, "pip==25.1.1"],
                            cwd=PROJECT_ROOT, env=env, check=True)
             pip_cmd = [sys.executable, "-m", "pip", "--python", str(python),
-                       "install", "--disable-pip-version-check"]
+                       "install", "--disable-pip-version-check", *offline]
         else:
             pip_cmd = [str(python), "-m", "pip", "install", "--disable-pip-version-check"]
         if name in {"chronos", "timesfm"}:
@@ -185,6 +219,9 @@ def _download_models(*, retries: int = 3) -> dict[str, Any]:
         files: dict[str, Any] = {}
         for filename, expected_hash in model["files"].items():
             target = model_dir / filename
+            if target.is_file() and not target.is_symlink() and _sha256(target).lower() == expected_hash.lower():
+                files[filename] = {"status": "ready", "path": str(target), "sha256": expected_hash}
+                continue
             error = None
             for attempt in range(1, retries + 1):
                 try:

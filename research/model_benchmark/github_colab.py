@@ -166,9 +166,19 @@ def prepare(repo: Path, work: Path, drive: Path, *, models: list[str] | None = N
         if not target.exists() or hash_file(target) != hash_file(source):
             shutil.copyfile(source, target)
     install_inputs(cache / "research-inputs.zip", cache / "assets-manifest.json", work / "source")
-    runtime = prepare_managed_python(work / "python312", work / "cache" / "python", progress=print)
-    env["FADACHI_MODEL_BENCHMARK_PYTHON"] = runtime["python"]
-    prepare_environments(repo, env)
+    from .drive_cache import cache_identity, restore_cache, save_cache
+    from .common import exclusive_lock
+    identity = cache_identity(repo)
+    print(f"Persistent Drive download cache: {drive / 'cache' / identity}", flush=True)
+    with exclusive_lock(work / "tmp" / "drive-cache-owner.lock"):
+        restore_cache(work / "cache", drive, identity)
+        try:
+            runtime = prepare_managed_python(work / "python312", work / "cache" / "python", progress=print)
+            env["FADACHI_MODEL_BENCHMARK_PYTHON"] = runtime["python"]
+            prepare_environments(repo, env)
+        finally:
+            # Save completed downloads even when a later installation fails.
+            save_cache(work / "cache", drive, identity)
     return env
 
 

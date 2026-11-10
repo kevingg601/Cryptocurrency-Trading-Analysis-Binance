@@ -44,3 +44,18 @@ GitHub 與 Colab 不會自動雙向同步；修改統一在本機 commit／push�
 - [Colab Secrets 官方實作](https://github.com/googlecolab/colabtools/blob/main/google/colab/userdata.py)
 
 本機只做必要非 GPU 檢查；真實 Colab 網頁登入、私有庫授權及 GPU 執行尚待手動確認。依使用者要求，未進行瀏覽器、畫面與互動驗證。既有結果仍為 PARTIAL，LightGBM 基準需另行補跑；這次僅修正新流程的 MPLBACKEND=Agg，不重訓或改寫原結果。
+
+## Drive 持久下載快取
+
+第4格現在自動保存與還原 `MyDrive/fadachi/cache/<鎖定版本識別>/`：
+
+- `python-<hash>.zip`：固定 Python 安裝包。
+- `wheels-<hash>.zip`：所選環境所需的完整 wheel 安裝檔與逐檔 hash 清單。
+- `models-<hash>.zip`：官方預訓練權重；不是這次訓練出的 adapter。
+- `python.json`、`wheels.json`、`models.json`：目前已完成、hash核對通過的快取索引。
+
+首次必須下載；之後先將快取壓縮包複製到 /content、檢查SHA256，再本機解壓。完整且逐檔hash吻合的wheel集合不再下載，實際安裝使用 --no-index；Python及官方模型也會核對鎖定hash並重用。沒有安裝好的venv放在Drive執行，新的runtime仍需本機安裝。
+
+快取依Python／套件／模型鎖檔與平台識別，不綁程式commit；一般程式更新可共用，鎖定版本變更才使用新目錄。安裝稍後失敗時也會盡力保存已下載項目；沒有已完成JSON索引的未完成上傳不會拿來還原。已保存內容不變時不重複上傳；內容變更使用新的不可變ZIP，舊ZIP保留，不自動清理。Drive備份需要時間與空間，等待顯示 `Drive cache saved` 或 `Drive cache unchanged` 後再刪除runtime。
+
+不需要手動建立cache資料夾。快取損壞時明確報錯並保留檔案，不以錯誤內容冒充驗證通過。此功能只透過第4格準備環境；不會自動執行第5格訓練。

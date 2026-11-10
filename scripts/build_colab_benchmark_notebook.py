@@ -156,7 +156,7 @@ def build_notebook() -> dict:
 else:
     print("Export mode: GPU check skipped")
 '''),
-        cell("markdown", "## 4. 準備鎖定環境與資料\n初次安裝／下載權重可能較久；只準備環境，不訓練。先將資料 ZIP 及 manifest 上傳 Drive 的 inputs/v3-20261110-004810/。"),
+        cell("markdown", "## 4. 準備鎖定環境與資料\n首次下載後會將 Python 安裝包、套件 wheels 與模型權重備份至 Drive 的 cache/；下次先還原並核對 hash，完整 wheels 以離線方式安裝。實際環境仍在 /content，不訓練。先將資料 ZIP 及 manifest 上傳 Drive 的 inputs/v3-20261110-004810/。"),
         cell("code", '''if ACTION != "export":
     from research.model_benchmark.github_colab import prepare
     ENV = prepare(REPO_ROOT, WORK_ROOT, DRIVE_ROOT, models=MODEL_KEYS)
