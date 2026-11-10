@@ -15,7 +15,7 @@ def cell(kind: str, source: str) -> dict:
 
 
 CONFIG = '''from pathlib import Path
-REPOSITORY = "kevingg601/------------"
+REPOSITORY = "kevingg601/Cryptocurrency-Trading-Analysis-Binance"
 CODE_COMMIT = ""  # REQUIRED: paste the exact 40-character GitHub commit from the release instructions
 PRIVATE_REPO = True  # False for a public repository
 GITHUB_SECRET_NAME = "FADACHI_GITHUB_TOKEN"

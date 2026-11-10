@@ -105,7 +105,7 @@ architecture.md  # 詳細架構說明
 
 ## Colab 模型研究
 
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/kevingg601/------------/blob/main/notebooks/model_benchmark_colab.ipynb)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/kevingg601/Cryptocurrency-Trading-Analysis-Binance/blob/main/notebooks/model_benchmark_colab.ipynb)
 
 上方為目前分支入口；正式實驗請使用交付的固定 commit 連結，並將同一 commit 填入 Notebook 的 CODE_COMMIT。私有庫需完成網頁授權及 Colab Secrets 的唯讀下載憑證設定。
 
