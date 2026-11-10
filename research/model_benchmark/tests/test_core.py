@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import ctypes
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -14,11 +15,13 @@ from unittest import mock
 import numpy as np
 import pandas as pd
 
-from research.model_benchmark.common import exclusive_lock, hash_file, verify_artifacts
-from research.model_benchmark.config import MODEL_KEYS, dataset_identity
+from research.model_benchmark.common import emit_stage_event, exclusive_lock, hash_file, verify_artifacts
+from research.model_benchmark import config as benchmark_config
+from research.model_benchmark.config import MODEL_KEYS, benchmark_fingerprint, dataset_identity, portable_identity
 from research.model_benchmark.dataset import build_common_cohort, freeze_common_cohort
 from research.model_benchmark.metrics import _ndcg, evaluate_common, evaluate_forecaster, evaluate_ranker
-from research.model_benchmark.runner import (_env_identity, _execute_model, _model_integrity, _make_run, _validate_prediction,
+from research.model_benchmark.runner import (_env_identity, _execute_model, _handle_posix_sigterm, _install_posix_sigterm_handler,
+                                             _mark_attempt_running, _model_integrity, _make_run, _run_worker, _validate_prediction,
                                              attach_common_metrics, main, run_in_order)
 from research.model_benchmark.process_tree import start_managed_process
 from research.model_benchmark.reporting import write_reports
@@ -231,6 +234,164 @@ class MetricTests(unittest.TestCase):
 
 
 class RunnerUtilityTests(unittest.TestCase):
+    def test_fingerprint_survives_checkout_and_environment_root_relocation(self) -> None:
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as temp:
+            base = Path(temp)
+            roots = [base / "checkout-one", base / "checkout-two"]
+            env_roots = [roots[0] / ".benchmark-envs", base / "separate-envs"]
+            for index, (root, env_root) in enumerate(zip(roots, env_roots, strict=True)):
+                module_dir = root / "research" / "model_benchmark"
+                env_dir = env_root / "rank"
+                module_dir.mkdir(parents=True)
+                env_dir.mkdir(parents=True)
+                (module_dir / "core.py").write_text("PORTABLE = 1\n", encoding="utf-8")
+                (module_dir / "model-assets.lock.json").write_text('{"models":{}}\n', encoding="utf-8")
+                (module_dir / "requirements-rank.lock.txt").write_text("catboost==1.2.8\n", encoding="utf-8")
+                (env_dir / "requirements.lock").write_text("catboost==1.2.8\n", encoding="utf-8")
+                (env_dir / "model-revision.json").write_text(json.dumps({"local_dir": str(root / f"weights-{index}")}), encoding="utf-8")
+            source_id = {"dataset_version": "v3", "files": {"panel": "f" * 64}}
+            fingerprints = []
+            for root, env_root in zip(roots, env_roots, strict=True):
+                with mock.patch.object(benchmark_config, "REPO_ROOT", root), \
+                     mock.patch.object(benchmark_config, "ENV_ROOT", env_root):
+                    fingerprints.append(benchmark_fingerprint("catboost", source_id))
+            self.assertEqual(fingerprints[0], fingerprints[1])
+
+    def test_portable_identity_omits_machine_paths_and_keeps_runtime_and_assets(self) -> None:
+        source = {"dataset_version": "v3", "files": {"panel.parquet": "a" * 64}}
+        envs = {
+            "chronos": {"manifest": {
+                "status": "ready", "python_version": "Python 3.12.14", "lock_sha256": "b" * 64,
+                "runtime": {"system": "Linux", "machine": "x86_64", "python_version": "3.12.14",
+                            "implementation": "cpython", "cache_tag": "cpython-312", "torch_version": "2.6.0+cu126",
+                            "torch_cuda": "12.6", "pip_version": "25.1.1"},
+                "model": {"repo_id": "amazon/chronos-2", "revision": "c" * 40,
+                          "files": {"weights.safetensors": {"sha256": "d" * 64}}},
+            }},
+        }
+        result = portable_identity(source, {"chronos2": "e" * 64}, envs)
+        encoded = json.dumps(result, sort_keys=True)
+        self.assertIn("2.6.0+cu126", encoded)
+        self.assertIn("weights.safetensors", encoded)
+        self.assertNotIn("D:\\\\", encoded)
+        self.assertNotIn("/content/", encoded)
+
+    def test_stage_event_snapshots_exact_manifest_and_only_hashes_final_run_relative_files(self) -> None:
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as temp:
+            run_dir = Path(temp) / "run-x"
+            (run_dir / "models" / "attempt-1").mkdir(parents=True)
+            (run_dir / "common_cohort.json").write_text('{"rows": []}\n', encoding="utf-8")
+            state_bytes = b'{"run_id":"run-x","status":"RUNNING","models":{"catboost":{"active_attempt":"models/attempt-1","status":"RUNNING"}}}\n'
+            (run_dir / "run_manifest.json").write_bytes(state_bytes)
+            (run_dir / "models" / "attempt-1" / "attempt_identity.json").write_text(
+                '{"fingerprint":"fp","model_key":"catboost"}\n', encoding="utf-8"
+            )
+            artifact = run_dir / "models" / "attempt-1" / "checkpoint.bin"
+            artifact.write_bytes(b"immutable-checkpoint")
+            event = emit_stage_event(
+                run_dir, event="candidate_completed", model_key="catboost", stage="long_trial_1",
+                portable_identity={"source_identity": {"dataset": "v3"}}, artifact_paths=[artifact],
+                attempt_dir=artifact.parent,
+            )
+            snapshot = run_dir / event["snapshot_context"]["manifest_path"]
+            self.assertEqual(snapshot.read_bytes(), state_bytes)
+            (run_dir / "run_manifest.json").write_text('{"run_id":"run-x","status":"PARTIAL"}\n', encoding="utf-8")
+            self.assertEqual(snapshot.read_bytes(), state_bytes)
+            records = {entry["path"]: entry["sha256"] for entry in event["artifact_manifest"]}
+            self.assertEqual(records["models/attempt-1/checkpoint.bin"], hash_file(artifact))
+            self.assertIn("common_cohort.json", records)
+            self.assertIn(event["snapshot_context"]["manifest_path"], records)
+            self.assertIn("models/attempt-1/attempt_identity.json", records)
+            self.assertEqual(event["attempt_dir"], "models/attempt-1")
+            self.assertTrue(all("\\" not in name for name in records))
+
+    def test_running_attempt_pointer_is_saved_before_worker_start(self) -> None:
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as temp:
+            run_dir = Path(temp) / "run-y"
+            attempt = run_dir / "models" / "catboost" / "attempt-01"
+            attempt.mkdir(parents=True)
+            (run_dir / "run_manifest.json").write_text('{"run_id":"run-y","models":{}}\n', encoding="utf-8")
+            (attempt / "attempt_identity.json").write_text(
+                '{"fingerprint":"expected","model_key":"catboost","device":"cpu"}\n', encoding="utf-8"
+            )
+            _mark_attempt_running(run_dir, "catboost", attempt, "cpu", "expected")
+            state = json.loads((run_dir / "run_manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(state["models"]["catboost"]["active_attempt"], "models/catboost/attempt-01")
+            self.assertEqual(state["models"]["catboost"]["active_attempt_identity_sha256"],
+                             hash_file(attempt / "attempt_identity.json"))
+            second_attempt = run_dir / "models" / "catboost" / "attempt-02"
+            second_attempt.mkdir(parents=True)
+            (second_attempt / "attempt_identity.json").write_text(
+                '{"fingerprint":"expected","model_key":"catboost","device":"cpu"}\n', encoding="utf-8"
+            )
+            _mark_attempt_running(run_dir, "catboost", second_attempt, "cpu", "expected")
+            state = json.loads((run_dir / "run_manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(state["models"]["catboost"]["attempt_dirs"], [
+                "models/catboost/attempt-01", "models/catboost/attempt-02",
+            ])
+
+    def test_posix_sigterm_is_an_interrupt_so_worker_finally_can_cleanup(self) -> None:
+        with self.assertRaises(KeyboardInterrupt):
+            _handle_posix_sigterm(signal.SIGTERM, None)
+        with mock.patch("research.model_benchmark.runner.sys.platform", "linux"):
+            previous = _install_posix_sigterm_handler()
+            try:
+                self.assertIs(signal.getsignal(signal.SIGTERM), _handle_posix_sigterm)
+            finally:
+                signal.signal(signal.SIGTERM, previous)
+
+    def test_worker_action_events_archive_final_stdout_stderr_logs_on_success_and_failure(self) -> None:
+        for exit_code in (0, 17):
+            with self.subTest(exit_code=exit_code), tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as temp:
+                run_dir = Path(temp) / "run-log"
+                attempt = run_dir / "models" / "catboost" / "attempt-01"
+                attempt.mkdir(parents=True)
+                (attempt / "attempt_identity.json").write_text(
+                    '{"fingerprint":"fp","model_key":"catboost","device":"cpu"}\n', encoding="utf-8"
+                )
+                state_path = run_dir / "run_manifest.json"
+                state_path.write_text(json.dumps({"run_id": run_dir.name, "status": "RUNNING",
+                                                  "models": {"catboost": {"active_attempt": "models/catboost/attempt-01"}}}),
+                                      encoding="utf-8")
+                script = "import json,sys; print('worker stdout marker',flush=True); " \
+                         "print('worker stderr marker',file=sys.stderr,flush=True); " \
+                         f"print(json.dumps({{'ok': True, 'result': {{'trained': True}}}}),flush=True); sys.exit({exit_code})"
+
+                def launch(_command, *, cwd, env):
+                    return start_managed_process([sys.executable, "-u", "-c", script], cwd=cwd, env=env)
+
+                with mock.patch("research.model_benchmark.runner._env_python", return_value=Path(sys.executable)), \
+                     mock.patch("research.model_benchmark.runner.start_managed_process", side_effect=launch):
+                    result, actual_exit, stderr = _run_worker(
+                        "catboost", "train", attempt, run_dir, "cpu", True, "fp", {},
+                        run_dir / "logs" / "catboost.log", state_path, {"fingerprints": {"catboost": "fp"}},
+                    )
+                final_log = Path(result["worker_log_path"])
+                self.assertEqual(actual_exit, exit_code)
+                self.assertEqual(result["worker_exit_code"], exit_code)
+                self.assertEqual(result["worker_log_sha256"], hash_file(final_log))
+                log_text = final_log.read_text(encoding="utf-8")
+                self.assertIn("worker stdout marker", log_text)
+                self.assertIn("worker stderr marker", log_text)
+                event = json.loads((run_dir / "stage_events.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+                self.assertEqual(event["event"], "worker_action_completed")
+                event_paths = {entry["path"] for entry in event["artifact_manifest"]}
+                self.assertIn("models/catboost/attempt-01/logs/train.log", event_paths)
+                self.assertIn("models/catboost/attempt-01/train-context.json", event_paths)
+                later_event = emit_stage_event(
+                    run_dir, event="checkpoint_saved", model_key="catboost", stage="next-stage",
+                    portable_identity={"fingerprints": {"catboost": "fp"}}, attempt_dir=attempt,
+                )
+                later_paths = {entry["path"] for entry in later_event["artifact_manifest"]}
+                self.assertIn("models/catboost/attempt-01/logs/train.log", later_paths)
+
+    def test_linux_environment_interpreter_path_is_portable(self) -> None:
+        root = Path("/opt/benchmark-envs")
+        with mock.patch("research.model_benchmark.runner.ENV_ROOT", root), \
+             mock.patch("research.model_benchmark.runner.sys.platform", "linux"):
+            from research.model_benchmark.runner import _env_python
+            self.assertEqual(_env_python("rank"), root / "rank" / "bin" / "python")
+
     def test_prediction_and_asset_contracts_follow_registry_not_model_keys(self) -> None:
         rank_spec = ModelSpec("thirdrank", "rank", "rank", "unused.module", "UnusedAdapter")
         forecast_spec = ModelSpec("newforecast", "forecast", "newforecast", "unused.module", "UnusedAdapter", True)
@@ -251,12 +412,16 @@ class RunnerUtilityTests(unittest.TestCase):
                 env_root = root / "envs"
                 rank_env = env_root / "rank"
                 rank_env.mkdir(parents=True)
-                (rank_env / "environment-manifest.json").write_text(json.dumps({"status": "ready"}), encoding="utf-8")
+                runtime = {"system": "Windows", "machine": "amd64", "python_version": "3.12.14",
+                           "implementation": "cpython", "cache_tag": "cpython-312", "torch_version": None,
+                           "torch_cuda": None}
+                (rank_env / "environment-manifest.json").write_text(json.dumps({"status": "ready", "runtime": runtime}), encoding="utf-8")
                 env_dir = env_root / "newforecast"
                 env_dir.mkdir(parents=True)
                 weight = env_dir / "pinned-model.bin"
                 weight.write_bytes(b"pinned revision")
-                manifest = {"status": "ready", "model": {"status": "ready", "repo_id": "example/model",
+                manifest = {"status": "ready", "python_version": "Python 3.12.14", "runtime": runtime,
+                            "model": {"status": "ready", "repo_id": "example/model",
                             "revision": "revision-1", "files": {weight.name: {"status": "ready", "path": str(weight),
                             "sha256": hash_file(weight)}}}}
                 (env_dir / "environment-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
@@ -390,10 +555,12 @@ class RunnerUtilityTests(unittest.TestCase):
             artifact.write_bytes(b"weights")
             prediction = attempt / "predictions.parquet"
             prediction.write_bytes(b"prediction")
-            (run_dir / "comparison.md").write_text("complete", encoding="utf-8")
             item = {"fingerprint": "config-v1", "status": "SUCCESS", "attempt_dir": str(attempt),
                     "training": {"trained": True}, "predict": {"fresh_load": True, "predictions_sha256": hash_file(prediction)},
                     "artifact_hashes": {"trained.bin": hash_file(artifact)}}
+            # Model-stage events are emitted before reporting, so model reuse
+            # must not depend on comparison.md existing yet.
+            self.assertFalse((run_dir / "comparison.md").exists())
             self.assertTrue(_model_integrity(item, run_dir, "config-v1"))
             self.assertFalse(_model_integrity(item, run_dir, "config-v2"))
             item["artifact_hashes"] = {"trained.bin": "0" * 64}
@@ -420,15 +587,16 @@ class RunnerIntegrationTests(unittest.TestCase):
             root = Path(temp)
             calls: list[tuple[str, str]] = []
 
-            def worker(key, action, attempt, run_dir, device, smoke, fingerprint, env_identity, log_path, state_path):
+            def worker(key, action, attempt, run_dir, device, smoke, fingerprint, env_identity, log_path, state_path, portable_id=None):
                 calls.append((action, device))
                 if action == "train" and device == "cuda":
                     return {}, 1, "CUDA out of memory"
                 if action == "train":
-                    artifact = attempt / "weights.bin"
+                    artifact = attempt / "nested" / "weights.bin"
+                    artifact.parent.mkdir(parents=True, exist_ok=True)
                     artifact.write_bytes(b"trained")
                     return {"trained": True, "training_steps": 1, "training_device": "cpu",
-                            "artifact_hashes": {"weights.bin": hash_file(artifact)}}, 0, ""
+                            "artifact_hashes": {str(artifact.relative_to(attempt)): hash_file(artifact)}}, 0, ""
                 frame = pd.DataFrame({"symbol": ["S00", "S00"], "open_time": [1, 1], "variant": ["pretrained", "finetuned"],
                                      "pred_close_4h": [100.0, 101.0], "pred_return_4h": [0.0, 0.01]})
                 frame.to_parquet(attempt / "predictions.parquet", index=False)
@@ -440,9 +608,11 @@ class RunnerIntegrationTests(unittest.TestCase):
             self.assertEqual(result["device"], "cpu")
             self.assertEqual(calls, [("train", "cuda"), ("train", "cpu"), ("predict", "cpu")])
             self.assertIn("retrying CPU", result["failures"][0]["error"])
+            self.assertIn("nested/weights.bin", result["artifact_hashes"])
+            self.assertTrue(all("\\" not in key for key in result["artifact_hashes"]))
 
             calls.clear()
-            def stale_predict_worker(key, action, attempt, run_dir, device, smoke, fingerprint, env_identity, log_path, state_path):
+            def stale_predict_worker(key, action, attempt, run_dir, device, smoke, fingerprint, env_identity, log_path, state_path, portable_id=None):
                 calls.append((action, device))
                 if action == "train":
                     artifact = attempt / "weights.bin"
@@ -469,7 +639,7 @@ class RunnerIntegrationTests(unittest.TestCase):
                 envs = {"rank": {}, "chronos": {}, "timesfm": {}}
                 fingerprints = {key: f"fp-{key}" for key in MODEL_KEYS}
 
-                def execute(key, directory, smoke, fingerprint, env_identity, expected_pairs, identity_check):
+                def execute(key, directory, smoke, fingerprint, env_identity, expected_pairs, identity_check, portable_id=None):
                     if key == failed_key:
                         return {"status": "FAILED", "evaluation_status": "FAILED"}
                     attempt = run_dir / "models" / key

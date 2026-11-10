@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "provider": "astral-sh/python-build-standalone",
+  "release_tag": "20251028",
+  "python_version": "3.12.12",
+  "target": "x86_64-unknown-linux-gnu",
+  "archive": "cpython-3.12.12+20251028-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz",
+  "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20251028/cpython-3.12.12%2B20251028-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz",
+  "sha256": "d136b7168603620bf82fd2ec0fcaed2a5853551aae66f8023b3ae32b435683f2",
+  "python_relative_path": "python/bin/python3.12"
+}

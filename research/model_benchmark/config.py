@@ -1,17 +1,40 @@
 """Benchmark identity and fixed experiment settings."""
 from __future__ import annotations
 
+import os
+import platform
 import sys
 from pathlib import Path
 from typing import Any
 
 from .common import canonical_json, hash_bytes, hash_file
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-SOURCE_ROOT = REPO_ROOT / "data-reruns" / "20261110-004810" / "model-research"
-RUNS_ROOT = REPO_ROOT / "data" / "model-benchmark" / "runs"
-CACHE_ROOT = REPO_ROOT / "data" / "model-benchmark" / "cache"
-ENV_ROOT = REPO_ROOT / ".benchmark-envs"
+def _configured_path(env_name: str, default: Path) -> Path:
+    configured = os.environ.get(env_name)
+    return Path(configured).expanduser().resolve() if configured else default.resolve()
+
+
+# Root means the checkout containing research/model_benchmark. Keeping this
+# explicit lets the same package run from a Windows checkout or a Colab clone.
+REPO_ROOT = _configured_path(
+    "FADACHI_MODEL_BENCHMARK_ROOT", Path(__file__).resolve().parents[2]
+)
+SOURCE_ROOT = _configured_path(
+    "FADACHI_MODEL_BENCHMARK_SOURCE_ROOT",
+    REPO_ROOT / "data-reruns" / "20261110-004810" / "model-research",
+)
+RUNS_ROOT = _configured_path(
+    "FADACHI_MODEL_BENCHMARK_RUNS_ROOT", REPO_ROOT / "data" / "model-benchmark" / "runs"
+)
+CACHE_ROOT = _configured_path(
+    "FADACHI_MODEL_BENCHMARK_CACHE_ROOT", REPO_ROOT / ".benchmark-cache"
+)
+ENV_ROOT = _configured_path(
+    "FADACHI_MODEL_BENCHMARK_ENV_ROOT", REPO_ROOT / ".benchmark-envs"
+)
+TMP_ROOT = _configured_path(
+    "FADACHI_MODEL_BENCHMARK_TMP_ROOT", REPO_ROOT / ".benchmark-tmp"
+)
 MODEL_KEYS = ("catboost", "xgboost", "chronos2", "timesfm25")
 
 RANK_CONFIG: dict[str, Any] = {
@@ -87,7 +110,6 @@ def dataset_identity(source_root: Path = SOURCE_ROOT) -> dict[str, Any]:
         "symbols": manifest.get("universe", {}).get("symbols", []),
         "panel_rows": manifest.get("files", {}).get("researchPanelParquet", {}).get("rows"),
         "test_rows": manifest.get("splitSummary", {}).get("test", {}).get("totalSymbolHourRows"),
-        "source_root": str(source_root.resolve()),
     }
 
 
@@ -104,6 +126,74 @@ def benchmark_fingerprint(key: str, source_id: dict[str, Any], smoke: bool = Fal
     from .registry import get_spec
     env_name = get_spec(key).environment
     env_dir = ENV_ROOT / env_name
-    config_files = tracked + [p for p in (env_dir / "requirements.lock", env_dir / "model-revision.json") if p.is_file()]
-    code_hash = "".join(f"{p.relative_to(REPO_ROOT)}:{hash_file(p)};" for p in sorted(set(config_files)))
-    return hash_bytes(canonical_json({"model": key, "config": config, "source": source_id, "code": code_hash, "python": sys.version.split()[0]}))
+    platform_lock = adapter_root / (
+        "requirements-" + env_name + (".linux.lock.txt" if sys.platform.startswith("linux") else ".lock.txt")
+    )
+    config_files = tracked + [
+        p for p in (env_dir / "requirements.lock", platform_lock)
+        if p.is_file()
+    ]
+    code_entries: list[tuple[str, str]] = []
+    for path in set(config_files):
+        if not path.is_file():
+            continue
+        try:
+            label = f"environment/{env_name}/{path.relative_to(env_dir).as_posix()}"
+        except ValueError:
+            try:
+                label = path.relative_to(REPO_ROOT).as_posix()
+            except ValueError:
+                label = f"external/{path.name}"
+        code_entries.append((label, hash_file(path)))
+    code_hash = "".join(f"{label}:{digest};" for label, digest in sorted(code_entries))
+    runtime = {
+        "system": platform.system(),
+        "machine": platform.machine().lower(),
+        "python": sys.version.split()[0],
+        "implementation": sys.implementation.name,
+        "cache_tag": sys.implementation.cache_tag,
+    }
+    return hash_bytes(canonical_json({"model": key, "config": config, "source": source_id,
+                                      "code": code_hash, "runtime": runtime}))
+
+
+def portable_identity(
+    source_identity: dict[str, Any],
+    fingerprints: dict[str, str],
+    environments: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    """Return root-independent identity shared by runner and Colab snapshots."""
+    env_records: dict[str, Any] = {}
+    for name, identity in sorted(environments.items()):
+        manifest = identity.get("manifest", {})
+        runtime = manifest.get("runtime", {})
+        model = manifest.get("model", {})
+        files = model.get("files", {}) if isinstance(model, dict) else {}
+        env_records[name] = {
+            "status": manifest.get("status"),
+            "python_version": manifest.get("python_version"),
+            "lock_sha256": manifest.get("lock_sha256"),
+            "runtime": {
+                key: runtime.get(key)
+                for key in ("system", "machine", "python_version", "implementation", "cache_tag", "torch_version", "torch_cuda", "pip_version")
+                if key in runtime
+            },
+            "model": {
+                "repo_id": model.get("repo_id"),
+                "revision": model.get("revision"),
+                "files": {filename: record.get("sha256") for filename, record in sorted(files.items())},
+            } if model else None,
+        }
+    return {
+        "schema": 1,
+        "platform": {
+            "system": platform.system(),
+            "machine": platform.machine().lower(),
+            "python_version": sys.version.split()[0],
+            "implementation": sys.implementation.name,
+            "cache_tag": sys.implementation.cache_tag,
+        },
+        "source_identity": source_identity,
+        "fingerprints": dict(sorted(fingerprints.items())),
+        "environments": env_records,
+    }

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import shutil
+from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
@@ -105,6 +107,59 @@ def test_resume_rejects_changed_smoke_selection_and_runner_fingerprint(tmp_path)
     changed_runner_fingerprint = {**base_context, "config_fingerprint": "runner-fingerprint-v2"}
     with pytest.raises(ValueError, match="identity mismatch"):
         RankAdapter("xgboost").train(changed_runner_fingerprint)
+
+
+def test_latest_candidate_event_contains_all_candidates_and_restores_without_original_paths(tmp_path):
+    pytest.importorskip("xgboost")
+    source = tmp_path / "source"
+    _synthetic_panel(source)
+    original_run = tmp_path / "original_run"
+    attempt = original_run / "models" / "xgboost" / "attempt-01"
+    attempt.mkdir(parents=True)
+    (attempt / "attempt_identity.json").write_text(
+        json.dumps({"fingerprint": "portable-fingerprint", "model_key": "xgboost", "device": "cpu"}),
+        encoding="utf-8",
+    )
+    (original_run / "run_manifest.json").write_text(
+        json.dumps({"run_id": original_run.name, "status": "RUNNING", "models": {
+            "xgboost": {"status": "RUNNING", "active_attempt": "models/xgboost/attempt-01"},
+        }}),
+        encoding="utf-8",
+    )
+    config = {"max_rounds": 25, "trial_configs": [dict(item) for item in XGBOOST_TRIALS[:2]]}
+    context = {
+        "source_root": str(source), "attempt_dir": str(attempt), "run_dir": str(original_run),
+        "device": "cpu", "smoke": True, "config_fingerprint": "portable-fingerprint", "config": config,
+    }
+    RankAdapter("xgboost").train(context)
+    latest_event = json.loads((original_run / "stage_events.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+    artifact_paths = {entry["path"] for entry in latest_event["artifact_manifest"]}
+    candidate_models = {path for path in artifact_paths if "/trials/" in path and path.endswith("/best.json")}
+    candidate_states = {path for path in artifact_paths if "/trials/" in path and path.endswith("/state.json")}
+    assert len(candidate_models) == len(candidate_states) == 4
+    assert "models/xgboost/attempt-01/attempt_identity.json" in artifact_paths
+
+    restored_run = tmp_path / "restored_run"
+    for relative in artifact_paths:
+        source_path = original_run / Path(relative)
+        target_path = restored_run / Path(relative)
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source_path, target_path)
+    restored_attempt = restored_run / latest_event["attempt_dir"]
+    (restored_run / "run_manifest.json").write_text(
+        json.dumps({"run_id": restored_run.name, "status": "RUNNING", "models": {
+            "xgboost": {"status": "RUNNING", "active_attempt": latest_event["attempt_dir"]},
+        }}),
+        encoding="utf-8",
+    )
+    # Prove state recovery does not reach back to a stale absolute path.
+    shutil.rmtree(original_run)
+    restored_context = {**context, "attempt_dir": str(restored_attempt), "run_dir": str(restored_run)}
+    resumed = RankAdapter("xgboost").train(restored_context)
+    assert all(row["resumed_complete"] for direction in ("long", "short") for row in resumed["trials"][direction])
+    resumed_event = json.loads((restored_run / "stage_events.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+    resumed_paths = {entry["path"] for entry in resumed_event["artifact_manifest"]}
+    assert len({path for path in resumed_paths if "/trials/" in path and path.endswith("/best.json")}) == 4
 
 
 def test_smoke_test_selection_uses_frozen_common_cohort_keys(tmp_path):

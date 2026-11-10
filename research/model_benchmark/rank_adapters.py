@@ -16,6 +16,7 @@ import pandas as pd
 from sklearn.metrics import ndcg_score
 
 from research.model_research.features_and_labels import FEATURE_COLUMNS, MIN_ELIGIBLE_SYMBOLS_PER_GROUP
+from .common import completed_candidate_artifacts, emit_stage_event
 
 
 SEED = 42
@@ -268,6 +269,7 @@ class RankAdapter:
         seed = int((context.get("config") or {}).get("seed", SEED))
         trial_records: dict[str, list[dict[str, Any]]] = {"long": [], "short": []}
         started = time.perf_counter()
+        stage_event_elapsed = 0.0
         for direction, label_col in (("long", "label_long"), ("short", "label_short")):
             _, train_labels, train_groups = _prepare(train_df, label_col)
             val_ordered, val_labels, val_groups = _prepare(val_df, label_col)
@@ -280,6 +282,19 @@ class RankAdapter:
                     trial_dir, fingerprint, train_df, train_labels, train_groups,
                     val_ordered, val_labels, val_groups, label_col, direction, params, seed, context,
                 )
+                event_started = time.perf_counter()
+                event_artifacts = completed_candidate_artifacts(attempt)
+                identity_path = attempt / "attempt_identity.json"
+                if identity_path.is_file():
+                    event_artifacts.append(identity_path)
+                emit_stage_event(
+                    Path(context["run_dir"]), event="candidate_completed", model_key=self.model_key,
+                    stage=f"{direction}_trial_{trial_index:02d}",
+                    portable_identity=context.get("portable_identity", {}),
+                    artifact_paths=event_artifacts,
+                    attempt_dir=attempt,
+                )
+                stage_event_elapsed += time.perf_counter() - event_started
                 trial_records[direction].append(record)
                 if best_trial is None or record["val_ndcg_at_5"] > best_trial["val_ndcg_at_5"]:
                     best_trial = record
@@ -308,6 +323,7 @@ class RankAdapter:
             "validation_ndcg_at_5": {direction: next(r["val_ndcg_at_5"] for r in rows if r.get("selected", False)) for direction, rows in trial_records.items()},
             "trials": trial_records,
             "train_elapsed_seconds": time.perf_counter() - started,
+            "stage_event_elapsed_seconds": stage_event_elapsed,
             "evaluation_protocol": "VAL mean group NDCG@5, linear relevance gain; TEST not used for selection",
             "smoke": bool(context.get("smoke", False)),
         }
@@ -445,7 +461,9 @@ class RankAdapter:
             "elapsed_seconds": time.perf_counter() - elapsed_start,
             "best_model_path": str(best_path),
         }
-        state.update({"fingerprint": fingerprint, "complete": True, "result": result, "completed_rounds": completed, "best_model_sha256": _sha256(best_path)})
+        state_result = {**result, "best_model_path": best_path.name}
+        state.update({"fingerprint": fingerprint, "complete": True, "result": state_result,
+                      "completed_rounds": completed, "best_model_sha256": _sha256(best_path)})
         _atomic_json(state_path, state)
         return {**result, "resumed_complete": False}
 

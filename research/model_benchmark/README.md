@@ -1,5 +1,7 @@
 # 四模型選幣與 K 線預測基準
 
+VS Code 連接 Colab A100 的 Notebook 入口與資料包操作方式見 [使用說明](../../COLAB_MODEL_BENCHMARK_USAGE.md)。Notebook 可保留遠端 Python 3.13 核心，程式另準備 Python 3.12 模型環境。Windows 入口仍可使用下列方式執行。
+
 此流程在固定 v3 資料上依序微調／訓練 CatBoost Ranker、XGBoost Ranker、Chronos-2 與 TimesFM 2.5。排序模型使用 CPU；時序模型優先使用可用 CUDA，OOM 後在新的 attempt 以 CPU 重試。各模型使用獨立 Python 環境，runner 不載入所有模型套件。
 
 ## 一行啟動

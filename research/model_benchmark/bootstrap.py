@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import json
 import os
+import platform
 import subprocess
 import sys
 import time
@@ -15,10 +16,11 @@ from typing import Any
 from . import config
 from .common import exclusive_lock
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PROJECT_ROOT = config.REPO_ROOT
 BENCHMARK_ROOT = Path(__file__).resolve().parent
-ENV_ROOT = PROJECT_ROOT / ".benchmark-envs"
-CACHE_ROOT = PROJECT_ROOT / ".benchmark-cache"
+ENV_ROOT = config.ENV_ROOT
+CACHE_ROOT = config.CACHE_ROOT
+TMP_ROOT = config.TMP_ROOT
 ASSET_LOCK = BENCHMARK_ROOT / "model-assets.lock.json"
 ENV_REQUIREMENTS = {
     "rank": BENCHMARK_ROOT / "requirements-rank.txt",
@@ -29,6 +31,11 @@ ENV_LOCKS = {
     "rank": BENCHMARK_ROOT / "requirements-rank.lock.txt",
     "chronos": BENCHMARK_ROOT / "requirements-chronos.lock.txt",
     "timesfm": BENCHMARK_ROOT / "requirements-timesfm.lock.txt",
+}
+LINUX_ENV_LOCKS = {
+    "rank": BENCHMARK_ROOT / "requirements-rank.linux.lock.txt",
+    "chronos": BENCHMARK_ROOT / "requirements-chronos.linux.lock.txt",
+    "timesfm": BENCHMARK_ROOT / "requirements-timesfm.linux.lock.txt",
 }
 
 
@@ -41,7 +48,33 @@ def _sha256(path: Path) -> str:
 
 
 def _python_path(name: str) -> Path:
-    return ENV_ROOT / name / "Scripts" / "python.exe"
+    if sys.platform.startswith("win"):
+        return ENV_ROOT / name / "Scripts" / "python.exe"
+    return ENV_ROOT / name / "bin" / "python"
+
+
+def _runtime_info(python: Path, *, require_torch: bool = False) -> dict[str, Any]:
+    script = "\n".join([
+        "import importlib.metadata as md, json, platform, sys",
+        "try:",
+        "    import torch",
+        "    tv, tc = torch.__version__, torch.version.cuda",
+        "except ImportError:",
+        "    tv = tc = None",
+        "print(json.dumps({'python_version': sys.version.split()[0],",
+        "    'implementation': sys.implementation.name, 'cache_tag': sys.implementation.cache_tag,",
+        "    'system': platform.system(), 'machine': platform.machine().lower(),",
+        "    'torch_version': tv, 'torch_cuda': tc, 'pip_version': md.version('pip')}))",
+    ])
+    result = subprocess.run([str(python), "-c", script], check=True, capture_output=True,
+                            text=True, encoding="utf-8")
+    runtime = json.loads(result.stdout.strip().splitlines()[-1])
+    if require_torch and not runtime.get("torch_version"):
+        raise RuntimeError("torch is required in Chronos/TimesFM isolated environments")
+    if not str(runtime.get("python_version", "")).startswith("3.12."):
+        raise RuntimeError(f"benchmark environments require Python 3.12.x, got {runtime.get('python_version')}")
+    runtime["platform"] = platform.platform()
+    return runtime
 
 
 def _write_json(path: Path, value: Any) -> None:
@@ -51,27 +84,38 @@ def _write_json(path: Path, value: Any) -> None:
     temp_path.replace(path)
 
 
+def _portable_path(path: Path) -> str:
+    try:
+        return path.resolve().relative_to(PROJECT_ROOT.resolve()).as_posix()
+    except ValueError:
+        return path.name
+
+
 def _prepare_env(name: str, *, force: bool = False) -> dict[str, Any]:
     env_dir = ENV_ROOT / name
     python = _python_path(name)
     requirement = ENV_REQUIREMENTS[name]
-    lock = ENV_LOCKS[name]
+    lock = LINUX_ENV_LOCKS[name] if sys.platform.startswith("linux") else ENV_LOCKS[name]
     result: dict[str, Any] = {
         "name": name,
-        "python": str(python),
-        "requirements": str(requirement),
-        "lock": str(lock),
+        "python": python.relative_to(ENV_ROOT).as_posix(),
+        "requirements": _portable_path(requirement),
+        "lock": _portable_path(lock),
         "status": "failed",
     }
     try:
-        task_tmp = PROJECT_ROOT / ".benchmark-tmp"
+        task_tmp = TMP_ROOT
         task_tmp.mkdir(parents=True, exist_ok=True)
         env = os.environ.copy()
         env["TEMP"] = str(task_tmp)
         env["TMP"] = str(task_tmp)
         if not python.exists():
             env_dir.parent.mkdir(parents=True, exist_ok=True)
-            subprocess.run([sys.executable, "-m", "venv", str(env_dir)], check=True, env=env)
+            create_args = [sys.executable, "-m", "venv"]
+            if sys.platform.startswith("linux"):
+                create_args.append("--without-pip")
+            create_args.append(str(env_dir))
+            subprocess.run(create_args, check=True, env=env)
         if not python.exists():
             raise RuntimeError(f"隔離環境未建立 Python：{python}")
 
@@ -85,7 +129,16 @@ def _prepare_env(name: str, *, force: bool = False) -> dict[str, Any]:
         env["CUDA_CACHE_PATH"] = str(CACHE_ROOT / "cuda")
         env["HF_HUB_DISABLE_TELEMETRY"] = "1"
         env["PYTHONUTF8"] = "1"
-        pip_cmd = [str(python), "-m", "pip", "install", "--disable-pip-version-check"]
+        if sys.platform.startswith("linux"):
+            # Seed pip from the already working interpreter; hosted runtimes
+            # sometimes omit ensurepip from their Python 3.12 installation.
+            subprocess.run([sys.executable, "-m", "pip", "--python", str(python),
+                            "install", "--disable-pip-version-check", "pip==25.1.1"],
+                           cwd=PROJECT_ROOT, env=env, check=True)
+            pip_cmd = [sys.executable, "-m", "pip", "--python", str(python),
+                       "install", "--disable-pip-version-check"]
+        else:
+            pip_cmd = [str(python), "-m", "pip", "install", "--disable-pip-version-check"]
         if name in {"chronos", "timesfm"}:
             pip_cmd.extend(["--extra-index-url", "https://download.pytorch.org/whl/cu126"])
         pip_cmd.extend(["-r", str(install_file)])
@@ -101,12 +154,12 @@ def _prepare_env(name: str, *, force: bool = False) -> dict[str, Any]:
                     time.sleep(min(2 ** (attempt - 1), 8))
         if last_error is not None:
             raise last_error
-        version = subprocess.run(
-            [str(python), "--version"], check=True, capture_output=True, text=True, encoding="utf-8"
-        ).stdout.strip()
+        runtime = _runtime_info(python, require_torch=name in {"chronos", "timesfm"})
+        version = f"Python {runtime['python_version']}"
         env_lock = env_dir / "requirements.lock"
         env_lock.write_bytes(lock.read_bytes())
-        result.update(status="ready", python_version=version, lock_sha256=_sha256(lock))
+        result.update(status="ready", python_version=version, runtime=runtime,
+                      platform=runtime["system"].lower(), lock_sha256=_sha256(lock))
     except Exception as exc:  # preserve each environment result and continue other models
         result["error"] = f"{type(exc).__name__}: {exc}"
     _write_json(env_dir / "environment-manifest.json", result)
@@ -213,8 +266,9 @@ def _prepare_locked(*, force: bool = False, manifest_path: Path | None = None) -
             ENV_ROOT / env_name / "model-revision.json",
             {
                 "repo_id": model.get("repo_id"), "revision": model.get("revision"),
-                "status": model.get("status"), "files": model.get("files", {}),
-                "local_dir": model.get("local_dir"),
+                "status": model.get("status"),
+                "files": {filename: {"status": record.get("status"), "sha256": record.get("sha256")}
+                          for filename, record in sorted(model.get("files", {}).items())},
             },
         )
     result: dict[str, Any] = {
@@ -235,6 +289,14 @@ def main() -> int:
     args = parser.parse_args()
     if not args.prepare:
         parser.error("specify --prepare")
+    if sys.version_info[:2] != (3, 12):
+        parser.error(f"benchmark bootstrap requires Python 3.12.x; current runtime is {sys.version.split()[0]}")
+    requested_python = os.environ.get("FADACHI_MODEL_BENCHMARK_PYTHON")
+    if requested_python and Path(requested_python).resolve() != Path(sys.executable).resolve():
+        parser.error(
+            "bootstrap must run with FADACHI_MODEL_BENCHMARK_PYTHON; "
+            f"requested {requested_python}, current interpreter is {sys.executable}"
+        )
     result = prepare(force=args.force, manifest_path=args.manifest)
     print(json.dumps(result, indent=2, ensure_ascii=False))
     return 0 if result["status"] == "ready" else 2

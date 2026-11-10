@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 import traceback
@@ -10,6 +11,28 @@ from pathlib import Path
 from typing import Any
 
 from .registry import load_adapter, get_spec
+
+
+def _configure_project_cache(context: dict[str, Any]) -> None:
+    """Set cache roots before importing torch or any model adapter package."""
+    root = Path(os.environ.get("FADACHI_MODEL_BENCHMARK_ROOT", Path(__file__).resolve().parents[2]))
+    cache = Path(os.environ.get("FADACHI_MODEL_BENCHMARK_CACHE_ROOT", root / ".benchmark-cache"))
+    tmp = Path(os.environ.get("FADACHI_MODEL_BENCHMARK_TMP_ROOT", root / ".benchmark-tmp"))
+    tmp.mkdir(parents=True, exist_ok=True)
+    for name, value in {
+        "HF_HOME": cache / "hf",
+        "HF_HUB_CACHE": cache / "hf" / "hub",
+        "PIP_CACHE_DIR": cache / "pip",
+        "TORCH_HOME": cache / "torch",
+        "CUDA_CACHE_PATH": cache / "cuda",
+        "XDG_CACHE_HOME": cache,
+        "MPLCONFIGDIR": cache / "matplotlib",
+        "TMP": tmp,
+        "TEMP": tmp,
+        "PYTHONUTF8": "1",
+        "PYTHONIOENCODING": "utf-8",
+    }.items():
+        os.environ[name] = str(value)
 
 
 def execute(context: dict[str, Any]) -> dict[str, Any]:
@@ -72,6 +95,7 @@ def main() -> int:
     args = parser.parse_args()
     try:
         context = json.loads(args.context.read_text(encoding="utf-8"))
+        _configure_project_cache(context)
         spec = get_spec(context["model_key"])
         if spec.environment != context.get("environment"):
             raise ValueError("context environment does not match registry")

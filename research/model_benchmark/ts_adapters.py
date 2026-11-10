@@ -6,20 +6,22 @@ import json
 import math
 import os
 import random
+import shutil
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Iterable
 
 import numpy as np
 import pandas as pd
 
-from .common import atomic_json, hash_file
-from .config import SOURCE_ROOT, TS_COMMON_CONFIG, TS_CONFIGS
+from .common import atomic_json, emit_stage_event, hash_file
+from .config import CACHE_ROOT, SOURCE_ROOT, TS_COMMON_CONFIG, TS_CONFIGS
 
 HOUR_MS = 3_600_000
 DAY_MS = 24 * HOUR_MS
 ASSET_LOCK_PATH = Path(__file__).with_name("model-assets.lock.json")
-ASSET_CACHE_ROOT = Path(__file__).resolve().parents[2] / ".benchmark-cache" / "models"
+ASSET_CACHE_ROOT = CACHE_ROOT / "models"
 
 
 def _read_asset_lock() -> dict[str, Any]:
@@ -28,6 +30,36 @@ def _read_asset_lock() -> dict[str, Any]:
 
 def _asset_dir(model_key: str) -> Path:
     return ASSET_CACHE_ROOT / model_key
+
+
+def _publish_best_checkpoint(model_key: str, model: Any, step: int, context: dict[str, Any]) -> tuple[Path, float]:
+    """Write a unique immutable LoRA adapter snapshot, then notify the watcher."""
+    started = time.perf_counter()
+    run_dir = Path(context["run_dir"]).resolve()
+    attempt = Path(context["attempt_dir"]).resolve()
+    root = Path(context.get("checkpoint_dir") or attempt / "best_checkpoints")
+    root.mkdir(parents=True, exist_ok=True)
+    name = f"step-{int(step):06d}-{uuid.uuid4().hex[:8]}"
+    temporary = root / f".{name}.tmp"
+    destination = root / name
+    temporary.mkdir(parents=False, exist_ok=False)
+    try:
+        model.save_pretrained(temporary, safe_serialization=True)
+        hashes = {path.name: hash_file(path) for path in sorted(temporary.iterdir()) if path.is_file()}
+        if not hashes:
+            raise RuntimeError("best LoRA checkpoint produced no files")
+        atomic_json(temporary / "snapshot.sha256.json", hashes)
+        os.replace(temporary, destination)
+        emit_stage_event(
+            run_dir, event="checkpoint_saved", model_key=model_key,
+            stage=f"val_best_step_{int(step)}", portable_identity=context.get("portable_identity", {}),
+            artifact_paths=[destination], attempt_dir=attempt,
+        )
+        return destination, time.perf_counter() - started
+    except BaseException:
+        if temporary.exists():
+            shutil.rmtree(temporary, ignore_errors=True)
+        raise
 
 
 def _ensure_asset_hashes(model_key: str) -> dict[str, Any]:
@@ -249,7 +281,8 @@ def _base_chronos_pipeline(device: str) -> Any:
 class _BestValidationCallback:
     """TrainerCallback which early-stops on external 4-hour return MAE."""
 
-    def __init__(self, adapter: "TsAdapter", val_rows: list[dict[str, Any]], device: str, patience: int):
+    def __init__(self, adapter: "TsAdapter", val_rows: list[dict[str, Any]], device: str, patience: int,
+                 context: dict[str, Any]):
         from transformers import TrainerCallback
 
         class Callback(TrainerCallback):
@@ -281,6 +314,7 @@ class _BestValidationCallback:
         self.val_rows = val_rows
         self.device = device
         self.patience = patience
+        self.context = context
         self.best_mae = math.inf
         self.best_step = 0
         self.best_state: dict[str, Any] | None = None
@@ -305,6 +339,7 @@ class _BestValidationCallback:
             self.best_state = {k: v.detach().cpu().clone() for k, v in state.items() if "lora_" in k.lower()}
             if not self.best_state:
                 raise RuntimeError("validation event found no trainable LoRA adapter weights")
+            self.adapter._record_best_checkpoint(model, step, self.context)
         else:
             self.stale_evaluations += 1
 
@@ -318,6 +353,13 @@ class TsAdapter:
         self.model_key = model_key
         self.model: Any | None = None
         self.device = "cpu"
+        self._checkpoint_snapshot_seconds = 0.0
+        self._checkpoint_artifacts: list[str] = []
+
+    def _record_best_checkpoint(self, model: Any, step: int, context: dict[str, Any]) -> None:
+        destination, elapsed = _publish_best_checkpoint(self.model_key, model, step, context)
+        self._checkpoint_snapshot_seconds += elapsed
+        self._checkpoint_artifacts.append(destination.relative_to(Path(context["attempt_dir"]).resolve()).as_posix())
 
     def _context(self, context: dict[str, Any]) -> tuple[Path, dict[str, Any], dict[str, Any]]:
         attempt = Path(context["attempt_dir"])
@@ -337,6 +379,8 @@ class TsAdapter:
         import torch
 
         attempt, boundaries, config = self._context(context)
+        self._checkpoint_snapshot_seconds = 0.0
+        self._checkpoint_artifacts = []
         _seed(int(config.get("seed", 42)))
         train_rows = _window_rows(
             _load_source(context)[0], boundaries, "train",
@@ -411,6 +455,7 @@ class TsAdapter:
                         best_step = step
                         stale = 0
                         best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items() if "lora_" in k.lower()}
+                        self._record_best_checkpoint(model, step, context)
                     else:
                         stale += 1
                     if not context.get("smoke") and stale >= int(config["early_stopping_evaluations"]):
@@ -443,6 +488,8 @@ class TsAdapter:
             "best_val_return_mae": float(best_mae), "val_metrics_pretrained": val_base,
             "val_metrics_finetuned": val_fine, "training_elapsed_seconds": time.perf_counter() - started,
             "device": self.device, "training_device": self.device, "dtype": "float32", "split_policy": "TRAIN windows only; VAL UTC midnight return MAE; TEST untouched",
+            "checkpoint_snapshot_seconds": self._checkpoint_snapshot_seconds,
+            "best_checkpoint_artifacts": list(self._checkpoint_artifacts),
             "config": config,
         }
         metadata["artifact_hashes"] = artifact_hashes
@@ -467,7 +514,7 @@ class TsAdapter:
         initial_adapter = None
         trainable_after: list[tuple[str, Any]] = []
         callback = _BestValidationCallback(
-            self, val_rows, self.device, int(config["early_stopping_evaluations"])
+            self, val_rows, self.device, int(config["early_stopping_evaluations"]), context
         )
         # fit() samples a random cutoff from each supplied series. Each supplied
         # item is exactly 256 historical closes plus 4 TRAIN labels, so every
@@ -569,7 +616,7 @@ class TsAdapter:
         attempt = Path(context["attempt_dir"])
         self._save_adapter(attempt / "adapter", self.model)
         return {
-            str(path.relative_to(attempt)): hash_file(path)
+            path.relative_to(attempt).as_posix(): hash_file(path)
             for path in sorted((attempt / "adapter").iterdir()) if path.is_file()
         }
 

@@ -15,7 +15,7 @@ import torch
 
 from research.model_benchmark import bootstrap
 from research.model_benchmark import ts_adapters
-from research.model_benchmark.ts_adapters import HOUR_MS, _require_peft, _timesfm_future_tensor, _window_rows
+from research.model_benchmark.ts_adapters import HOUR_MS, TsAdapter, _require_peft, _timesfm_future_tensor, _window_rows
 
 
 def _klines(symbols: int = 12, end_hour: int = 1500) -> pd.DataFrame:
@@ -116,6 +116,19 @@ def test_chronos_fails_closed_when_peft_cannot_be_imported(monkeypatch: pytest.M
         _require_peft()
 
 
+def test_ts_saved_nested_artifact_hashes_use_posix_relative_paths(tmp_path: Path) -> None:
+    class FakeModel:
+        def save_pretrained(self, destination, safe_serialization=True):
+            Path(destination, "README.md").write_text("adapter artifact", encoding="utf-8")
+
+    attempt = tmp_path / "attempt"
+    adapter = TsAdapter("chronos2")
+    adapter.model = FakeModel()
+    artifact_hashes = adapter.save({"attempt_dir": str(attempt)})
+    assert set(artifact_hashes) == {"adapter/README.md", "adapter/adapter.sha256.json"}
+    assert all("\\" not in key for key in artifact_hashes)
+
+
 def test_bootstrap_uses_prebuilt_lock_and_retries_install(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     env_root = tmp_path / "envs"
     benchmark_root = tmp_path / "benchmark"
@@ -145,6 +158,11 @@ def test_bootstrap_uses_prebuilt_lock_and_retries_install(tmp_path: Path, monkey
         return SimpleNamespace(stdout="Python 3.12.14\n", returncode=0)
 
     monkeypatch.setattr(bootstrap.subprocess, "run", fake_run)
+    monkeypatch.setattr(bootstrap, "_runtime_info", lambda _python, **_kwargs: {
+        "python_version": "3.12.14", "implementation": "cpython", "cache_tag": "cpython-312",
+        "system": "Windows", "machine": "amd64", "torch_version": "2.6.0+cu126", "torch_cuda": "12.6",
+        "platform": "Windows-test",
+    })
     monkeypatch.setattr(bootstrap.time, "sleep", lambda _seconds: None)
     result = bootstrap._prepare_env("rank")
     install_call = next(call for call in calls if "pip" in call)
