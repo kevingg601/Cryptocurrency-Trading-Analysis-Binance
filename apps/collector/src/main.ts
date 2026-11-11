@@ -17,6 +17,10 @@ import { AIDataAggregator } from './ai/aiDataAggregator.ts';
 import { AICLIRunner } from './ai/cliRunner.ts';
 import { AIScheduler } from './ai/aiScheduler.ts';
 import { AIScopeStore } from './ai/scopeStore.ts';
+import { ModelResearchRunner } from './research/modelResearchRunner.ts';
+import { TradeBus } from './modelPaper/tradeBus.ts';
+import { RollingModelPipeline } from './modelPaper/rollingPipeline.ts';
+import { ModelPaperService, loadResearchUniverse } from './modelPaper/service.ts';
 
 export function resolveDataDir(startDir = process.cwd()): string {
   if (process.env.FADACHI_DATA) {
@@ -79,6 +83,22 @@ async function bootstrap() {
   let hourlyTimer: NodeJS.Timeout | undefined;
   let aiScheduler: AIScheduler | undefined;
   let aiAggregator: AIDataAggregator | undefined;
+  const researchRunner = new ModelResearchRunner({ dataDir });
+  const tradeBus = new TradeBus();
+  const researchUniverse = loadResearchUniverse(researchRunner.dataDir);
+  if (researchUniverse.error) {
+    console.warn(`[Collector] ModelPaper universe unavailable: ${researchUniverse.error}`);
+  }
+  const rollingPipeline = new RollingModelPipeline({
+    runner: researchRunner,
+    dataDir: researchRunner.dataDir,
+    workspaceRoot: researchRunner.workspaceRoot,
+    autoHourlyEnabled: true,
+    runOnStart: true,
+    retrainIntervalHours: 6,
+  });
+  researchRunner.attachRollingPipeline(rollingPipeline);
+  let modelPaperService: ModelPaperService | undefined;
   const start = async () => {
     await initDatabase(duckClient, path.resolve(import.meta.dirname, 'storage', 'schema.sql'));
     controller.signal.throwIfAborted();
@@ -119,19 +139,23 @@ async function bootstrap() {
     const symbols = await universeManager.updateUniverse(market);
 
     controller.signal.throwIfAborted();
-    const streamNames: string[] = [];
+    const streamNameSet = new Set<string>();
     if (market === 'futures') {
-      streamNames.push('!ticker@arr');
+      streamNameSet.add('!ticker@arr');
     } else {
-      symbols.forEach(s => streamNames.push(`${s.toLowerCase()}@ticker`));
+      symbols.forEach(s => streamNameSet.add(`${s.toLowerCase()}@ticker`));
     }
 
-    symbols.forEach(s => {
-      streamNames.push(`${s.toLowerCase()}@aggTrade`);
-      streamNames.push(`${s.toLowerCase()}@kline_1m`);
+    const aggTradeSymbols = market === 'futures'
+      ? Array.from(new Set([...symbols, ...researchUniverse.symbols]))
+      : symbols;
+    aggTradeSymbols.forEach(s => {
+      streamNameSet.add(`${s.toLowerCase()}@aggTrade`);
     });
-
-    if (market === 'futures') aiAggregator.derivatives.startLiquidationStream();
+    symbols.forEach(s => {
+      streamNameSet.add(`${s.toLowerCase()}@kline_1m`);
+    });
+    const streamNames = Array.from(streamNameSet);
 
     const streamManager = new BinanceStreamManager(market, streamNames, {
       onMessage: (payload, receivedAt) => {
@@ -225,6 +249,17 @@ async function bootstrap() {
               receivedAt,
             });
 
+            if (market === 'futures') {
+              tradeBus.emitTrade({
+                symbol,
+                price,
+                qty,
+                aggId,
+                tradeTime,
+                receivedAt,
+              });
+            }
+
             track(em.processTrade(tradeObj, receivedAt));
 
             track(gd.checkAggTrade(symbol, aggId, tradeTime).then(async (gap) => {
@@ -279,12 +314,34 @@ async function bootstrap() {
       },
       onStatusChange: (status) => {
         liveHub.broadcastStatus(status, market);
+        if (market === 'futures') {
+          tradeBus.emitStatus(status);
+        }
       },
     });
 
-    streamManager.start();
     streamManagers.push(streamManager);
   }
+
+  controller.signal.throwIfAborted();
+  if (targetMarkets.includes('futures')) {
+    aiAggregator.derivatives.startLiquidationStream();
+  }
+  streamManagers.forEach(manager => manager.start());
+  modelPaperService = new ModelPaperService({
+    client: duckClient,
+    dataDir: researchRunner.dataDir,
+    workspaceRoot: researchRunner.workspaceRoot,
+    runner: researchRunner,
+    tradeBus,
+    rollingPipeline,
+    universeSymbols: researchUniverse.symbols,
+    available: !researchUniverse.error && researchUniverse.symbols.length >= 10,
+    availabilityReason: researchUniverse.error,
+  });
+  await modelPaperService.start();
+  rollingPipeline.start();
+  controller.signal.throwIfAborted();
 
   // Hourly Parquet flush
   hourlyTimer = setInterval(() => {
@@ -312,6 +369,10 @@ async function bootstrap() {
     token,
     aiAggregator,
     cliRunner,
+    researchRunner,
+    tradeBus,
+    modelPaperService,
+    rollingPipeline,
   });
 
   const address = await server.listen({ port, host: '127.0.0.1' });
@@ -332,14 +393,17 @@ async function bootstrap() {
       controller.abort();
       if (aiScheduler) await aiScheduler.stop();
       await starting.catch(() => {});
-      if (hourlyTimer) clearInterval(hourlyTimer);
-      streamManagers.forEach(manager => manager.stop());
-      aiAggregator?.derivatives.stop();
-      liveHub.close();
       const failures: unknown[] = [];
       const attempt = async (work: () => Promise<unknown>) => {
         try { await work(); } catch (err) { failures.push(err); console.error('[Collector] Shutdown error:', err); }
       };
+      if (modelPaperService) await attempt(() => modelPaperService!.stop());
+      await attempt(() => rollingPipeline.stop());
+      researchRunner.close();
+      if (hourlyTimer) clearInterval(hourlyTimer);
+      streamManagers.forEach(manager => manager.stop());
+      aiAggregator?.derivatives.stop();
+      liveHub.close();
       if (server) await attempt(() => server!.close());
       await Promise.allSettled([...background]);
       let drained = false;

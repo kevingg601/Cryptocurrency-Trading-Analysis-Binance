@@ -298,6 +298,7 @@ test('ModelResearchRunner & Collector API: normal run, concurrent 409, invalid J
         // Normal run: also write result.json & latest-run.json to simulate worker's atomic commit
         const now = Date.now();
         const result = buildMockRunResult(req.runId, now, now + 3_600_000);
+        result.kronosModel = req.kronosModel;
         const runDir = path.join(tmpDir, 'model-research', req.runId);
         fs.mkdirSync(runDir, { recursive: true });
         fs.writeFileSync(path.join(runDir, 'result.json'), JSON.stringify(result, null, 2));
@@ -372,7 +373,7 @@ test('ModelResearchRunner & Collector API: normal run, concurrent 409, invalid J
   const runRes = await server.inject({
     method: 'POST',
     url: '/api/research/run',
-    payload: { kronosModel: 'small' },
+    payload: { kronosModel: 'chronos2' },
   });
   assert.equal(runRes.statusCode, 200);
   const { jobId, runId } = runRes.json();
@@ -388,6 +389,7 @@ test('ModelResearchRunner & Collector API: normal run, concurrent 409, invalid J
 
   const jobDone = (await server.inject({ method: 'GET', url: `/api/research/jobs/${jobId}` })).json();
   assert.equal(jobDone.status, 'SUCCEEDED');
+  assert.equal(jobDone.result.kronosModel, 'chronos2');
   assert.equal(jobDone.result.runId, runId);
   assert.equal(jobDone.result.validityStatus, 'SUCCESS');
   assert.equal(jobDone.result.isExpired, false);

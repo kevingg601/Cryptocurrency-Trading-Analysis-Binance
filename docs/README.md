@@ -1,6 +1,8 @@
 # 文件索引
 
 - [Colab 網頁操作指南](COLAB_MODEL_BENCHMARK_USAGE.md)
+- [Chronos-2 微調模型接入說明](CHRONOS2_INTEGRATION.md)
+- [Chronos-2 每小時自動推論與前向虛擬帳戶測試計畫](CHRONOS2_FORWARD_PAPER_TRADING_PLAN.md)
 - [Drive 上傳清單](DRIVE_UPLOAD_MANIFEST.md)
 - [系統架構](architecture.md)
 - [歷史計畫與交付文件](archive/)

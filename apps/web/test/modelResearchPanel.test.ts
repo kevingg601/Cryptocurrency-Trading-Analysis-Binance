@@ -194,3 +194,9 @@ test('Real aggregate configured=false preserves missing-model and empty-data sta
   }) }), 'EMPTY');
 });
 
+
+
+test('Chronos selection requires its own deployment rather than a ready Kronos model', () => {
+  assert.equal(deriveResearchPanelState({ statusData: makeReadyStatus(), selectedKronosModel: 'chronos2' }), 'MODEL_MISSING');
+  assert.equal(deriveResearchPanelState({ statusData: makeReadyStatus({ chronos2: { installed: true } }), selectedKronosModel: 'chronos2' }), 'EMPTY');
+});

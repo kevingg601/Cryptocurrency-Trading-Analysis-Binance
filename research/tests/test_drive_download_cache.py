@@ -9,7 +9,7 @@ from research.model_benchmark.drive_cache import save_cache, restore_cache, cach
 
 def test_cache_roundtrip_reuse_and_excludes_installed_environment(tmp_path):
     local = tmp_path / "local"
-    for category in ("python", "wheels", "models", "envs"):
+    for category in ("python", "pip", "wheels", "models", "envs"):
         path = local / category / "tiny.bin"
         path.parent.mkdir(parents=True)
         path.write_bytes(category.encode())
@@ -22,7 +22,7 @@ def test_cache_roundtrip_reuse_and_excludes_installed_environment(tmp_path):
     assert sorted(p.name for p in (drive / "cache/identity").iterdir()) == before
     fresh = tmp_path / "fresh"
     restore_cache(fresh, drive, "identity")
-    for category in ("python", "wheels", "models"):
+    for category in ("python", "pip", "wheels", "models"):
         assert (fresh / category / "tiny.bin").read_bytes() == category.encode()
     assert not (fresh / "envs").exists()
     assert not (fresh / "models/download.incomplete").exists()

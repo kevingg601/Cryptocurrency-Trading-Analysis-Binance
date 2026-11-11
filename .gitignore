@@ -127,3 +127,6 @@ desktop.ini
 **/lgbm_long_ranker.txt
 **/lgbm_short_ranker.txt
 **/adapter/
+
+# Downloaded Colab archives and stage snapshots
+/outputs/

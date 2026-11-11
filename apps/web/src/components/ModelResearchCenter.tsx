@@ -69,6 +69,21 @@ const STATUS_LABELS: Record<ResearchRunValidityStatus, string> = {
   EXPIRED: '結果已過期 (EXPIRED)',
 };
 
+function ChronosCloseChart({ forecast }: { forecast: KronosSymbolForecast }) {
+  const history = forecast.historicalCandles.map(c => c.close);
+  const predicted = forecast.predictedCloses?.map(c => c.close) ?? [];
+  const values = [...history, ...predicted];
+  if (!values.length) return null;
+  const min = Math.min(...values), span = Math.max(...values) - min || 1;
+  const point = (v: number, i: number) => `${20 + i / Math.max(values.length - 1, 1) * 760},${220 - (v - min) / span * 190}`;
+  return <svg viewBox="0 0 800 250" width="100%" role="img" aria-label={`${forecast.symbol} 歷史收盤價與 Chronos-2 未來四小時收盤價預測`}>
+    <polyline fill="none" stroke="#94a3b8" strokeWidth="2" points={history.map(point).join(' ')} />
+    <polyline fill="none" stroke="#60a5fa" strokeWidth="3" strokeDasharray="6 4"
+      points={[history[history.length - 1], ...predicted].map((v,i) => point(v, history.length - 1 + i)).join(' ')} />
+    <text x="20" y="245" fill="#94a3b8" fontSize="12">灰線：歷史收盤價 / 藍色虛線：未來 4 小時收盤價中位數預測</text>
+  </svg>;
+}
+
 function KronosForecastSvgChart({
   forecast,
 }: {
@@ -138,7 +153,7 @@ function KronosForecastSvgChart({
         viewBox={`0 0 ${width} ${height}`}
         className="mr-svg-chart"
         role="img"
-        aria-label={`${forecast.symbol} 歷史 K 線與 Kronos 未來 4 小時預測路徑`}
+        aria-label={`${forecast.symbol} 歷史 K 線與 所選模型未來 4 小時預測路徑`}
       >
         {/* Horizontal price grid lines */}
         {[0, 0.25, 0.5, 0.75, 1].map((ratio) => {
@@ -261,12 +276,14 @@ export default function ModelResearchCenter({
   onSelectSymbol,
   onSwitchToFutures,
 }: ModelResearchCenterProps) {
-  const [selectedKronosModel, setSelectedKronosModel] = useState<KronosModelKey>('small');
+  const [selectedKronosModel, setSelectedKronosModel] = useState<KronosModelKey>('chronos2');
   const [statusData, setStatusData] = useState<ModelResearchStatusResponse | null>(null);
   const [latestResult, setLatestResult] = useState<ModelResearchRunResult | null>(null);
   const [activeJob, setActiveJob] = useState<ModelResearchJobRecord | null>(null);
   const [loadingInitial, setLoadingInitial] = useState<boolean>(true);
   const [triggerError, setTriggerError] = useState<string | null>(null);
+  const [retrainFeedback, setRetrainFeedback] = useState<string | null>(null);
+  const [triggeringRetrain, setTriggeringRetrain] = useState<boolean>(false);
   const [focusSymbol, setFocusSymbol] = useState<string>(propSymbol || 'BTCUSDT');
 
   const refreshAll = useCallback(async () => {
@@ -365,6 +382,20 @@ export default function ModelResearchCenter({
     }
   };
 
+  const handleTriggerChronosRetrain = async () => {
+    try {
+      setTriggerError(null);
+      setTriggeringRetrain(true);
+      const res = await collectorClient.triggerChronosRetrain(6);
+      setRetrainFeedback(res.message);
+      await refreshAll();
+    } catch (err: any) {
+      setTriggerError(err?.message || '啟動本機 Chronos-2 GPU 重訓失敗');
+    } finally {
+      setTriggeringRetrain(false);
+    }
+  };
+
   // Compute overall panel validity status covering all 8 required states
   const panelState: ResearchRunValidityStatus = useMemo(
     () =>
@@ -386,6 +417,9 @@ export default function ModelResearchCenter({
   const selectedForecast = latestResult?.forecasts?.[focusSymbol] ?? null;
   const offlineComp = latestResult?.offlineComparison ?? statusData?.offlineComparison ?? null;
 
+  const rolling = statusData?.rollingPipeline ?? null;
+  const isChronosTraining = Boolean(rolling?.chronos2?.isTraining || rolling?.autoSchedule?.isTrainingChronos);
+
   return (
     <div className="mr-container" data-testid="model-research-center">
       {/* Header Bar */}
@@ -393,9 +427,9 @@ export default function ModelResearchCenter({
         <div className="mr-header-title">
           <Cpu size={22} color="#60a5fa" />
           <div>
-            <h2>模型選幣研究（LightGBM 排名 + Kronos 預測）</h2>
+            <h2>模型選幣研究（LightGBM 排名 + 時序模型預測）</h2>
             <span className="mr-subtitle">
-              USDT 永續合約・1h K 線預測未來 4h・預設手動推論・僅供模型研究比較（不接入自動下單或 A/B 交易）
+              USDT 永續合約・180 天滑動視窗・LightGBM 每小時自動重訓・Chronos-2 LoRA 每 6 小時本機 GPU 重訓
             </span>
           </div>
         </div>
@@ -409,7 +443,11 @@ export default function ModelResearchCenter({
             <span>{STATUS_LABELS[panelState]}</span>
           </span>
 
-          <div className="mr-model-selector" role="group" aria-label="選擇 Kronos 模型規模">
+          <div className="mr-model-selector" role="group" aria-label="選擇預測模型">
+            <button type="button" className={`mr-model-btn ${selectedKronosModel === 'chronos2' ? 'active' : ''}`}
+              disabled={panelState === 'LOADING'} onClick={() => setSelectedKronosModel('chronos2')}>
+              Chronos-2 微調版
+            </button>
             <button
               type="button"
               className={`mr-model-btn ${selectedKronosModel === 'small' ? 'active' : ''}`}
@@ -417,7 +455,7 @@ export default function ModelResearchCenter({
               onClick={() => setSelectedKronosModel('small')}
               title="預設載入 Kronos-small (24.7M)，不與 base 共駐顯存"
             >
-              Kronos-small (預設)
+              Kronos-small
             </button>
             <button
               type="button"
@@ -433,16 +471,27 @@ export default function ModelResearchCenter({
           <button
             type="button"
             className="mr-run-btn"
-            disabled={panelState === 'LOADING' || marketType !== 'futures'}
+            disabled={panelState === 'LOADING' || marketType !== 'futures' || isChronosTraining}
             onClick={() => void handleRunInference()}
             title={
               marketType !== 'futures'
                 ? '此功能僅支援 USDT 永續合約模式'
-                : `使用 LightGBM + Kronos-${selectedKronosModel} 執行手動研究推論`
+                : `更新 180 天資料、重訓 LightGBM 並執行 ${selectedKronosModel === 'chronos2' ? 'Chronos-2 本機微調版' : `Kronos-${selectedKronosModel}`} 推論`
             }
           >
             <Play size={14} />
-            <span>{panelState === 'LOADING' ? '推論執行中...' : `手動執行推論 (${selectedKronosModel})`}</span>
+            <span>{panelState === 'LOADING' ? '更新／重訓／推論中...' : `立即更新並推論 (${selectedKronosModel})`}</span>
+          </button>
+
+          <button
+            type="button"
+            className="mr-secondary-btn"
+            disabled={triggeringRetrain || isChronosTraining || panelState === 'LOADING'}
+            onClick={() => void handleTriggerChronosRetrain()}
+            title="立即於背景使用本機 GPU 重新訓練 Chronos-2 LoRA（預設每 6 小時自動執行）"
+          >
+            <RefreshCw size={14} className={isChronosTraining ? 'spinning' : ''} />
+            <span>{isChronosTraining ? 'GPU 微調中...' : '重訓 Chronos-2 (GPU)'}</span>
           </button>
 
           <button
@@ -491,13 +540,67 @@ export default function ModelResearchCenter({
         </div>
       )}
 
+      {(retrainFeedback || isChronosTraining) && (
+        <div className="mr-banner" role="status" style={{ background: 'rgba(59, 130, 246, 0.12)', borderColor: 'rgba(96, 165, 250, 0.35)' }}>
+          <div>
+            <RefreshCw size={15} className={isChronosTraining ? 'spinning' : ''} style={{ verticalAlign: 'middle', marginRight: '6px' }} />
+            <span>
+              {isChronosTraining
+                ? '正在背景使用本機 GPU 重新訓練 Chronos-2 LoRA（180 天滑動視窗）…期間既有模型可照常推論。'
+                : retrainFeedback}
+            </span>
+          </div>
+        </div>
+      )}
+
+      {rolling && (
+        <section className="mr-meta-strip">
+          <div className="mr-meta-card">
+            <span>LightGBM 滾動重訓（每 1 小時 / CPU）</span>
+            <strong>
+              {rolling.lgbm?.ready
+                ? `${rolling.lgbm.versionId} ・ ${formatUtcAndTaipei(rolling.lgbm.trainedAt)}`
+                : '尚未完成滾動訓練（將於下次整點或手動觸發建立）'}
+            </strong>
+            {rolling.lgbm?.valNdcg5Long != null && rolling.lgbm?.valNdcg5Short != null && (
+              <span className="mr-note">
+                Val NDCG@5：多 {rolling.lgbm.valNdcg5Long.toFixed(4)} / 空 {rolling.lgbm.valNdcg5Short.toFixed(4)}
+              </span>
+            )}
+          </div>
+          <div className="mr-meta-card">
+            <span>Chronos-2 LoRA（每 {rolling.chronos2?.retrainIntervalHours ?? 6} 小時 / 本機 GPU）</span>
+            <strong>
+              {rolling.chronos2?.ready
+                ? `${rolling.chronos2.versionId} ・ ${formatUtcAndTaipei(rolling.chronos2.trainedAt)}`
+                : rolling.chronos2?.isTraining
+                  ? '首次本機 GPU 訓練進行中...'
+                  : `尚未就緒（${rolling.chronos2?.reason || '請點擊「重訓 Chronos-2 (GPU)」'}）`}
+            </strong>
+            <span className="mr-note">
+              {rolling.chronos2?.valReturnMae != null ? `Val 4h MAE：${(rolling.chronos2.valReturnMae * 100).toFixed(3)}% ・ ` : ''}
+              下次 GPU 重訓：{rolling.chronos2?.nextRetrainAt ? formatUtcAndTaipei(rolling.chronos2.nextRetrainAt) : '--'}
+            </span>
+          </div>
+          <div className="mr-meta-card">
+            <span>每小時自動更新排程 / 滑動視窗</span>
+            <strong>
+              {rolling.autoSchedule?.enabled ? '自動運作中' : '待機'} ・ {rolling.windowDays} 天滾動視窗
+            </strong>
+            <span className="mr-note">
+              下次整點更新：{rolling.autoSchedule?.nextRunAt ? formatUtcAndTaipei(rolling.autoSchedule.nextRunAt) : '--'}
+            </span>
+          </div>
+        </section>
+      )}
+
       {/* Expired Result Banner */}
       {panelState === 'EXPIRED' && latestResult && (
         <div className="mr-banner expired-banner" role="status">
           <div>
             <Clock size={15} style={{ verticalAlign: 'middle', marginRight: '6px' }} />
             <strong>研究結果已過期：</strong>
-            資料截止時間為 {formatUtcAndTaipei(latestResult.cutoffTime)}，已超過下一小時截止點（{formatUtcAndTaipei(latestResult.expiresAt)}）。請先準備較新的研究資料再手動推論；單純重跑不會下載或更新 K 線。
+            資料截止時間為 {formatUtcAndTaipei(latestResult.cutoffTime)}，已超過下一小時截止點（{formatUtcAndTaipei(latestResult.expiresAt)}）。系統將於每小時整點自動同步與推論，亦可點擊右上方「立即更新並推論」馬上同步 180 天資料並重訓 LightGBM。
           </div>
         </div>
       )}
@@ -507,10 +610,10 @@ export default function ModelResearchCenter({
         <section className="mr-card" role="status">
           <h3>環境或研究資料集尚未設定 (UNCONFIGURED)</h3>
           <p className="mr-note">
-            {statusData?.statusReason || '尚未準備 180 天 1 小時 K 線與資金費率資料集。依規範啟動應用時不自動安裝、下載或訓練，請於終端機執行：'}
+            {statusData?.statusReason || '尚未準備 180 天 1 小時 K 線與資金費率資料集。請先確認研究環境與幣種種子資料，或執行資料準備：'}
           </p>
           <pre style={{ background: 'var(--bg-primary)', padding: '10px', borderRadius: '8px', fontSize: '12px', overflowX: 'auto' }}>
-            {`.\\.venv\\Scripts\\python.exe -m research.model_research.cli prepare-data\n.\\.venv\\Scripts\\python.exe -m research.model_research.cli download-weights --model all\n.\\.venv\\Scripts\\python.exe -m research.model_research.cli train-lgbm\n.\\.venv\\Scripts\\python.exe -m research.model_research.cli evaluate`}
+            {`.\\.venv\\Scripts\\python.exe -m research.model_research.cli prepare-data\n.\\.venv\\Scripts\\python.exe -m research.model_research.cli download-weights --model all`}
           </pre>
         </section>
       )}
@@ -519,9 +622,21 @@ export default function ModelResearchCenter({
         <section className="mr-card" role="alert">
           <h3>模型權重或排名模型缺失 (MODEL_MISSING)</h3>
           <p className="mr-note">
-            LightGBM 狀態：{statusData?.lightgbmReady ? '已就緒' : '未訓練'} ｜ Kronos-small：{statusData?.kronosModels?.small?.installed ? '已安裝' : '未安裝'} ｜ Kronos-base：{statusData?.kronosModels?.base?.installed ? '已安裝' : '未安裝'}。
-            POST 推論不會自動下載或訓練模型。
+            Chronos-2（本機滾動 LoRA）：{statusData?.chronos2?.installed ? '已就緒' : '未就緒'}（{statusData?.chronos2?.reason ?? statusData?.chronos2?.runId ?? '尚未完成本機 GPU 微調'}）｜ LightGBM 滾動排名：{statusData?.lightgbmReady ? '已就緒（每小時自動重訓）' : '將在首次更新與推論時自動訓練'} ｜ Kronos-small：{statusData?.kronosModels?.small?.installed ? '已安裝' : '未安裝'} ｜ Kronos-base：{statusData?.kronosModels?.base?.installed ? '已安裝' : '未安裝'}。
           </p>
+          {selectedKronosModel === 'chronos2' && !statusData?.chronos2?.installed && (
+            <div>
+              <button
+                type="button"
+                className="mr-secondary-btn"
+                disabled={triggeringRetrain || isChronosTraining}
+                onClick={() => void handleTriggerChronosRetrain()}
+              >
+                <RefreshCw size={14} className={isChronosTraining ? 'spinning' : ''} />
+                <span>{isChronosTraining ? '正在背景執行本機 GPU 微調...' : '立即於本機 GPU 訓練 Chronos-2 LoRA'}</span>
+              </button>
+            </div>
+          )}
         </section>
       )}
 
@@ -529,7 +644,7 @@ export default function ModelResearchCenter({
         <section className="mr-card" role="status">
           <h3>尚無研究推論紀錄 (EMPTY)</h3>
           <p className="mr-note">
-            環境與模型已就緒。請點擊右上角「手動執行推論」以產生最新決策小時的 LightGBM 多空 Top 5 排名與 Kronos 未來 4 小時預測。
+            環境與模型已就緒。系統將於每小時整點自動更新，或點擊右上角「立即更新並推論」以產生最新決策小時的 LightGBM 多空 Top 5 排名與所選模型未來 4 小時預測。
           </p>
         </section>
       )}
@@ -579,7 +694,7 @@ export default function ModelResearchCenter({
             </strong>
           </div>
           <div className="mr-meta-card">
-            <span>Kronos 推論耗時 / 峰值顯存</span>
+            <span>時序模型推論耗時 / 峰值顯存</span>
             <strong>
               {latestResult.models?.kronos?.totalElapsedMs ?? '--'} ms /{' '}
               {latestResult.models?.kronos?.peakVramAllocatedMb ?? '--'} MiB
@@ -601,7 +716,7 @@ export default function ModelResearchCenter({
               <span className="mr-note">標籤：下一根 1h 開盤做多持有 4h 扣成本淨報酬分級 (0~4)</span>
             </div>
             <div className="mr-note">
-              ⚠️ 「排名分數」僅代表同一決策小時內之相對排序高低，<strong>不得解釋為勝率或預期報酬率</strong>。點擊標的切換下方 Kronos 預測圖。
+              ⚠️ 「排名分數」僅代表同一決策小時內之相對排序高低，<strong>不得解釋為勝率或預期報酬率</strong>。點擊標的切換下方模型預測圖。
             </div>
             <div className="mr-table-wrapper">
               <table className="mr-table">
@@ -634,7 +749,7 @@ export default function ModelResearchCenter({
                         <td>
                           <strong>{row.symbol}</strong>
                           {row.conflict && <span className="mr-conflict-tag">多空排名衝突</span>}
-                          {hasKronos && <span className="mr-kronos-tag">Kronos Top3</span>}
+                          {hasKronos && <span className="mr-kronos-tag">預測 Top3</span>}
                         </td>
                         <td style={{ fontFamily: 'monospace', fontWeight: 700, color: '#10b981' }}>
                           {row.rankingScore.toFixed(4)}
@@ -704,7 +819,7 @@ export default function ModelResearchCenter({
                         <td>
                           <strong>{row.symbol}</strong>
                           {row.conflict && <span className="mr-conflict-tag">多空排名衝突</span>}
-                          {hasKronos && <span className="mr-kronos-tag">Kronos Top3</span>}
+                          {hasKronos && <span className="mr-kronos-tag">預測 Top3</span>}
                         </td>
                         <td style={{ fontFamily: 'monospace', fontWeight: 700, color: '#ef4444' }}>
                           {row.rankingScore.toFixed(4)}
@@ -740,10 +855,10 @@ export default function ModelResearchCenter({
             <h3>
               <Activity size={17} color="#60a5fa" />
               <span>
-                Kronos-{latestResult.kronosModel} 未來 4 小時 K 線預測路徑（輸入連續 256 根已收盤 1h K，預測 4 根）
+                {latestResult.kronosModel === 'chronos2' ? 'Chronos-2 微調版：未來 4 小時收盤價路徑' : `Kronos-${latestResult.kronosModel}：未來 4 小時 K 線預測路徑`}
               </span>
             </h3>
-            <div className="mr-symbol-tabs" role="tablist" aria-label="Kronos 推論候選標的">
+            <div className="mr-symbol-tabs" role="tablist" aria-label="模型推論候選標的">
               {forecastSymbols.map((sym) => (
                 <button
                   key={sym}
@@ -773,6 +888,17 @@ export default function ModelResearchCenter({
                 <strong>{selectedForecast.elapsedMs} ms</strong> ｜ 峰值顯存：
                 <strong>{selectedForecast.peakVramAllocatedMb} MiB</strong>（保留 {selectedForecast.peakVramReservedMb} MiB）
               </div>
+              {selectedForecast.forecastType === 'close' ? (
+                <>
+                  <div className="mr-note">{selectedForecast.dispersionDisclaimer} 輸入連續 256 根已收盤 1h 收盤價。</div>
+                  <ChronosCloseChart forecast={selectedForecast} />
+                  <table className="mr-table"><thead><tr><th>步數</th><th>預測收盤時間（UTC）</th><th>收盤價中位數預測</th><th>相較截止收盤價</th></tr></thead>
+                    <tbody>{selectedForecast.predictedCloses?.map(c => <tr key={c.step}>
+                      <td>+{c.step}h</td><td>{new Date(c.closeTime + 1).toISOString().slice(0,16).replace('T',' ')}</td>
+                      <td>${formatCryptoPrice(c.close)}</td><td>{formatPct(c.close / selectedForecast.lastClosePrice - 1, 3)}</td>
+                    </tr>)}</tbody></table>
+                </>
+              ) : (<>
               <div className="mr-note">
                 📌 <strong>抽樣離散程度聲明：</strong>圖中藍色陰影與下表範圍為固定{' '}
                 <code>batch=1, sample_count=5, seed=42, T=1.0, top_p=0.9</code> 下之{' '}
@@ -825,10 +951,11 @@ export default function ModelResearchCenter({
                   </tbody>
                 </table>
               </div>
+              </>)}
             </>
           ) : (
             <div className="mr-note">
-              目前選取標的（{focusSymbol}）不在本次多空各 Top 3 去重候選清單（{forecastSymbols.join(', ')}）內；請點擊上方候選標籤檢視 Kronos 預測。
+              目前選取標的（{focusSymbol}）不在本次多空各 Top 3 去重候選清單（{forecastSymbols.join(', ')}）內；請點擊上方候選標籤檢視模型預測。
             </div>
           )}
         </section>

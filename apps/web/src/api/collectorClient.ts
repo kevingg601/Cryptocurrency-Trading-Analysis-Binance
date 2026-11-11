@@ -11,10 +11,14 @@ import {
   type ReplayResult,
   type ReplayInput,
   type KronosModelKey,
+  type ModelPaperAdaptersResponse,
+  type ModelPaperExperimentDetail,
+  type ModelPaperExperimentListItem,
   type ModelResearchJobRecord,
   type ModelResearchRunResult,
   type ModelResearchStatusResponse,
   type ResearchRunValidityStatus,
+  type RollingPipelineStatus,
   parseWithInfinity,
   stringifyWithInfinity,
 } from '@fadachi/core';
@@ -326,6 +330,100 @@ export class CollectorClient {
 
   async getResearchJob(jobId: string): Promise<ModelResearchJobRecord> {
     return this.request(`/api/research/jobs/${encodeURIComponent(jobId)}`);
+  }
+
+  async getResearchPipelineStatus(): Promise<RollingPipelineStatus> {
+    return this.request('/api/research/pipeline');
+  }
+
+  async triggerChronosRetrain(retrainIntervalHours = 6): Promise<{
+    started: boolean;
+    isTraining: boolean;
+    message: string;
+  }> {
+    return this.request('/api/research/pipeline/retrain-chronos', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ retrainIntervalHours }),
+    });
+  }
+
+  async getModelPaperAdapters(): Promise<ModelPaperAdaptersResponse> {
+    return this.request('/api/model-paper/adapters');
+  }
+
+  async createModelPaperExperiment(params: {
+    requestId: string;
+    adapterRunDir?: string;
+    retrainIntervalHours?: number;
+  }): Promise<ModelPaperExperimentDetail> {
+    return this.request('/api/model-paper/experiments', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params),
+    });
+  }
+
+  async listModelPaperExperiments(): Promise<{ experiments: ModelPaperExperimentListItem[] }> {
+    return this.request('/api/model-paper/experiments');
+  }
+
+  async getModelPaperExperiment(id: string): Promise<ModelPaperExperimentDetail> {
+    return this.request(`/api/model-paper/experiments/${encodeURIComponent(id)}`);
+  }
+
+  async pauseModelPaperExperiment(id: string, requestId: string): Promise<ModelPaperExperimentDetail> {
+    return this.request(`/api/model-paper/experiments/${encodeURIComponent(id)}/pause`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ requestId }),
+    });
+  }
+
+  async resumeModelPaperExperiment(id: string, requestId: string): Promise<ModelPaperExperimentDetail> {
+    return this.request(`/api/model-paper/experiments/${encodeURIComponent(id)}/resume`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ requestId }),
+    });
+  }
+
+  async stopModelPaperExperiment(id: string, requestId: string): Promise<ModelPaperExperimentDetail> {
+    return this.request(`/api/model-paper/experiments/${encodeURIComponent(id)}/stop`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ requestId }),
+    });
+  }
+
+  async exportModelPaperExperiment(
+    id: string,
+    kind: 'decisions' | 'fills' | 'equity' | 'config' | 'all',
+    format: 'csv' | 'json',
+  ): Promise<{ filename: string; contentType: string; content: string }> {
+    const headers = new Headers();
+    if (this.config.token) {
+      headers.set('Authorization', `Bearer ${this.config.token}`);
+    }
+    const params = new URLSearchParams({ kind, format });
+    const url = `${this.config.apiBase}/api/model-paper/experiments/${encodeURIComponent(id)}/export?${params.toString()}`;
+    const res = await fetch(url, { headers, signal: AbortSignal.timeout(30_000) });
+    if (!res.ok) {
+      let detail = res.statusText;
+      try {
+        const payload = await res.clone().json();
+        if (typeof payload?.error === 'string') detail = payload.error;
+      } catch { /* ignore */ }
+      throw new Error(`匯出失敗 (${res.status}): ${detail}`);
+    }
+    const disposition = res.headers.get('content-disposition') ?? '';
+    const match = /filename="([^"]+)"/.exec(disposition);
+    const filename = match?.[1] || `model-paper-${id}-${kind}.${format}`;
+    return {
+      filename,
+      contentType: res.headers.get('content-type') || (format === 'csv' ? 'text/csv; charset=utf-8' : 'application/json; charset=utf-8'),
+      content: await res.text(),
+    };
   }
 
   connectLive(

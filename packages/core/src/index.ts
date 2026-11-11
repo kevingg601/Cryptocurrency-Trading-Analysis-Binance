@@ -31,5 +31,6 @@ export * from './ai/aiOutputValidator.ts';
 export * from './ai/abSerialization.ts';
 export * from './auto/abCoordinator.ts';
 export * from './research/researchTypes.ts';
+export * from './modelPaper/index.ts';
 export * from './utils.ts';
 

@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import type { CoinMetadata, TickerData, MarketType } from '../services/binance';
 import { Plus, Trash2, Wallet, TrendingUp, TrendingDown } from 'lucide-react';
 import { formatCryptoPrice } from '../services/utils';
+import ModelPaperPanel from './ModelPaperPanel';
 
 interface PortfolioItem {
   id: string;
@@ -15,9 +16,10 @@ interface PortfolioProps {
   tickers: Record<string, TickerData>;
   coins: CoinMetadata[];
   marketType: MarketType;
+  theme?: 'dark' | 'light';
 }
 
-export default function Portfolio({ tickers, coins, marketType }: PortfolioProps) {
+export default function Portfolio({ tickers, coins, marketType, theme = 'dark' }: PortfolioProps) {
   const storageKey = `crypto_portfolio_items_${marketType}`;
 
   // State initialized dynamically via useEffect to handle market type switching
@@ -115,7 +117,8 @@ export default function Portfolio({ tickers, coins, marketType }: PortfolioProps
   const marketTypeName = marketType === 'spot' ? '現貨資產' : '永續合約';
 
   return (
-    <div className="portfolio-grid">
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
+      <div className="portfolio-grid">
       {/* Transaction Entry Form */}
       <div className="sidebar-panel">
         <div className="card">
@@ -315,6 +318,9 @@ export default function Portfolio({ tickers, coins, marketType }: PortfolioProps
           )}
         </div>
       </div>
+      </div>
+
+      <ModelPaperPanel theme={theme} />
     </div>
   );
 }

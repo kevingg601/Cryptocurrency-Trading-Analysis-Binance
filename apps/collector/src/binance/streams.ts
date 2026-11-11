@@ -87,12 +87,14 @@ export class BinanceStreamManager {
     });
   }
 
-  private getUrl(shard: string[]): string {
-    const base = this.market === 'spot' ? SPOT_WS_BASE : FUTURES_WS_BASE;
-    if (this.market === 'futures' && shard.length === 1 && shard[0] === '!ticker@arr') {
-      return `${base}/market/ws/!ticker@arr`;
+  getUrl(shard: string[]): string {
+    if (this.market === 'futures') {
+      if (shard.length === 1 && shard[0] === '!ticker@arr') {
+        return `${FUTURES_WS_BASE}/market/ws/!ticker@arr`;
+      }
+      return `${FUTURES_WS_BASE}/market/stream?streams=${shard.join('/')}`;
     }
-    return `${base}/stream?streams=${shard.join('/')}`;
+    return `${SPOT_WS_BASE}/stream?streams=${shard.join('/')}`;
   }
 
   private connectShard(shardIndex: number, shard: string[]) {

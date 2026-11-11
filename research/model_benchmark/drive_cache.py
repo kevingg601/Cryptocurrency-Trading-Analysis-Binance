@@ -13,7 +13,7 @@ from pathlib import Path, PurePosixPath
 
 from .common import atomic_json, hash_file
 
-CATEGORIES = ("python", "wheels", "models")
+CATEGORIES = ("python", "pip", "wheels", "models")
 
 
 def cache_identity(repo: Path) -> str:

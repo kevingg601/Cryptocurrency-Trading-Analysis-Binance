@@ -13,6 +13,7 @@ import {
   evaluateResearchValidityStatus,
   isResearchRunExpired,
 } from '@fadachi/core';
+import type { RollingModelPipeline } from '../modelPaper/rollingPipeline.ts';
 
 export type SpawnResearchWorker = (
   command: string,
@@ -38,7 +39,7 @@ const DEFAULT_STATUS_TIMEOUT_MS = 30 * 1000;
 function isValidRunResult(value: any): value is ModelResearchRunResult {
   return Boolean(value && typeof value === 'object'
     && typeof value.runId === 'string' && /^run-[A-Za-z0-9_-]{1,120}$/.test(value.runId)
-    && ['small', 'base'].includes(value.kronosModel) && value.market === 'futures'
+    && ['small', 'base', 'chronos2'].includes(value.kronosModel) && value.market === 'futures'
     && ['SUCCESS', 'INSUFFICIENT_DATA'].includes(value.status)
     && Number.isFinite(value.cutoffTime) && Number.isFinite(value.expiresAt)
     && value.expiresAt > value.cutoffTime && Number.isFinite(value.generatedAt)
@@ -80,6 +81,8 @@ export class ModelResearchRunner {
   private readonly nativeSpawn: boolean;
 
   private activeJob: ModelResearchJobRecord | null = null;
+  private activeExclusiveLabel: string | null = null;
+  private rollingPipeline: RollingModelPipeline | null = null;
   private lastJob: ModelResearchJobRecord | null = null;
   private readonly jobs = new Map<string, ModelResearchJobRecord>();
   private readonly activeProcesses = new Set<ChildProcessWithoutNullStreams>();
@@ -146,8 +149,42 @@ export class ModelResearchRunner {
     }
   }
 
+  attachRollingPipeline(pipeline: RollingModelPipeline): void {
+    this.rollingPipeline = pipeline;
+  }
+
+  getRollingPipeline(): RollingModelPipeline | null {
+    return this.rollingPipeline;
+  }
+
   isBusy(): boolean {
-    return this.activeJob !== null || this.runProcesses.size > 0;
+    return this.activeJob !== null || this.activeExclusiveLabel !== null || this.runProcesses.size > 0;
+  }
+
+  async runExclusive<T>(
+    label: string,
+    fn: () => Promise<T>,
+    options: { allowDuringJobId?: string } = {},
+  ): Promise<T> {
+    const allowedActiveJob = Boolean(
+      options.allowDuringJobId
+      && this.activeJob?.jobId === options.allowDuringJobId
+      && this.activeExclusiveLabel === null
+      && this.runProcesses.size === 0,
+    );
+    if (this.isBusy() && !allowedActiveJob) {
+      throw new ModelResearchBusyError(
+        this.activeJob?.jobId ?? this.activeExclusiveLabel ?? this.lastJob?.jobId ?? 'terminating-worker',
+      );
+    }
+    this.activeExclusiveLabel = label;
+    try {
+      return await fn();
+    } finally {
+      if (this.activeExclusiveLabel === label) {
+        this.activeExclusiveLabel = null;
+      }
+    }
   }
 
   getJob(jobId: string): ModelResearchJobRecord | null {
@@ -252,7 +289,7 @@ export class ModelResearchRunner {
       const configured = Boolean(
         workerStatus.datasetReady
         && workerStatus.lightgbmReady
-        && (workerStatus.kronosModels?.small?.installed || workerStatus.kronosModels?.base?.installed),
+        && (workerStatus.kronosModels?.small?.installed || workerStatus.kronosModels?.base?.installed || workerStatus.chronos2?.installed),
       );
 
       let statusReason: string | undefined;
@@ -260,9 +297,35 @@ export class ModelResearchRunner {
         statusReason = '研究資料集尚未準備（請先執行 CLI prepare-data）';
       } else if (!workerStatus.lightgbmReady) {
         statusReason = 'LightGBM 排名模型尚未訓練（請先執行 CLI train-lgbm）';
-      } else if (!workerStatus.kronosModels?.small?.installed && !workerStatus.kronosModels?.base?.installed) {
-        statusReason = 'Kronos 預訓練權重尚未安裝（請先執行 CLI download-weights）';
+      } else if (!workerStatus.kronosModels?.small?.installed && !workerStatus.kronosModels?.base?.installed && !workerStatus.chronos2?.installed) {
+        statusReason = '預測模型尚未安裝（請匯入 Chronos-2 adapter 或準備 Kronos 權重）';
       }
+
+      const liveSchedule = this.rollingPipeline?.getStatus();
+      const rollingPipeline = workerStatus.rollingPipeline
+        ? {
+            ...workerStatus.rollingPipeline,
+            ...(liveSchedule?.autoSchedule ? { autoSchedule: liveSchedule.autoSchedule } : {}),
+            chronos2: {
+              ...workerStatus.rollingPipeline.chronos2,
+              isTraining: liveSchedule?.chronos2?.isTraining ?? workerStatus.rollingPipeline.chronos2?.isTraining ?? false,
+            },
+          }
+        : liveSchedule ?? null;
+
+      const chronosStatusReport = workerStatus.rollingPipeline
+        ? {
+            ...workerStatus.chronos2,
+            installed: Boolean(rollingPipeline?.chronos2?.ready ?? workerStatus.chronos2?.installed),
+            reason: rollingPipeline?.chronos2?.reason ?? workerStatus.chronos2?.reason,
+            versionId: rollingPipeline?.chronos2?.versionId,
+            trainedAt: rollingPipeline?.chronos2?.trainedAt,
+            valReturnMae: rollingPipeline?.chronos2?.valReturnMae,
+            nextRetrainAt: rollingPipeline?.chronos2?.nextRetrainAt,
+            isTraining: rollingPipeline?.chronos2?.isTraining,
+            lastError: rollingPipeline?.chronos2?.lastError,
+          }
+        : workerStatus.chronos2;
 
       return {
         configured,
@@ -278,6 +341,8 @@ export class ModelResearchRunner {
         lightgbmReady: Boolean(workerStatus.lightgbmReady),
         lightgbmMetadata: workerStatus.lightgbmMetadata ?? null,
         artifactWarnings: Array.isArray(workerStatus.artifactWarnings) ? workerStatus.artifactWarnings : [],
+        chronos2: chronosStatusReport,
+        rollingPipeline,
         kronosModels: workerStatus.kronosModels ?? {
           small: {
             modelKey: 'small',
@@ -350,7 +415,7 @@ export class ModelResearchRunner {
       throw new ModelResearchBusyError(this.activeJob?.jobId ?? this.lastJob?.jobId ?? 'terminating-worker');
     }
 
-    const kronosModel: KronosModelKey = options.kronosModel === 'base' ? 'base' : 'small';
+    const kronosModel: KronosModelKey = options.kronosModel === 'chronos2' ? 'chronos2' : options.kronosModel === 'base' ? 'base' : 'small';
     const now = Date.now();
     const jobId = `job-${now}-${randomUUID().slice(0, 8)}`;
     const runId = `run-${now}-${kronosModel}-${randomUUID().slice(0, 6)}`;
@@ -391,16 +456,46 @@ export class ModelResearchRunner {
     }
 
     try {
-      const payload: Record<string, unknown> = {
-        action: 'run',
-        runId: job.runId,
-        dataDir: this.dataDir,
-        kronosModel: job.kronosModel,
-      };
-      if (options.cutoffTime !== undefined) payload.cutoffTime = options.cutoffTime;
-      if (options._simulateFailure) payload._simulateFailure = options._simulateFailure;
+      let rawResult: ModelResearchRunResult;
+      if (
+        this.rollingPipeline
+        && options.cutoffTime === undefined
+        && !options._simulateFailure
+        && job.kronosModel === 'chronos2'
+      ) {
+        const now = Date.now();
+        const targetHourH = Math.floor(now / 3_600_000) * 3_600_000 - 3_600_000;
+        const cycleRes = await this.rollingPipeline.runHourlyCycle({
+          targetHourH,
+          now,
+          commitRunId: job.runId,
+          lockOwnerJobId: job.jobId,
+          force: true,
+          retrainLgbm: true,
+          commitResearch: true,
+          requireChronosReady: true,
+          triggerChronosRetrainIfDue: false,
+        });
+        const committedPath = path.join(
+          this.dataDir,
+          'model-research',
+          cycleRes.committedRunId || job.runId,
+          'result.json',
+        );
+        rawResult = JSON.parse(await fsp.readFile(committedPath, 'utf8')) as ModelResearchRunResult;
+      } else {
+        const payload: Record<string, unknown> = {
+          action: 'run',
+          runId: job.runId,
+          dataDir: this.dataDir,
+          kronosModel: job.kronosModel,
+          ...(this.rollingPipeline && options.cutoffTime === undefined ? { useRolling: true, retrainLgbm: true } : {}),
+        };
+        if (options.cutoffTime !== undefined) payload.cutoffTime = options.cutoffTime;
+        if (options._simulateFailure) payload._simulateFailure = options._simulateFailure;
 
-      const rawResult = (await this.invokeWorker(payload, this.jobTimeoutMs)) as ModelResearchRunResult;
+        rawResult = (await this.invokeWorker(payload, this.jobTimeoutMs)) as ModelResearchRunResult;
+      }
       if (!isValidRunResult(rawResult) || rawResult.runId !== job.runId || rawResult.kronosModel !== job.kronosModel) {
         throw Object.assign(new Error('Worker 回傳結構無效'), { errorCode: 'INVALID_WORKER_OUTPUT' });
       }
@@ -434,26 +529,44 @@ export class ModelResearchRunner {
   }
 
   private invokeWorker(requestPayload: Record<string, unknown>, timeoutMs: number): Promise<any> {
+    return this.invokeWorkerWith(
+      this.pythonExecutable,
+      ['-m', 'research.model_research.worker'],
+      requestPayload,
+      timeoutMs,
+      { trackBusy: requestPayload.action === 'run' },
+    );
+  }
+
+  invokeWorkerWith(
+    pythonExecutable: string,
+    args: string[],
+    requestPayload: Record<string, unknown> | null,
+    timeoutMs: number,
+    options: { env?: NodeJS.ProcessEnv; cwd?: string; trackBusy?: boolean } = {},
+  ): Promise<any> {
     return new Promise((resolve, reject) => {
       const env: NodeJS.ProcessEnv = {
         ...process.env,
         PYTHONIOENCODING: 'utf-8',
         PYTHONUTF8: '1',
         FADACHI_DATA: this.dataDir,
+        ...(options.env ?? {}),
       };
 
       const child = this.spawnWorker(
-        this.pythonExecutable,
-        ['-m', 'research.model_research.worker'],
+        pythonExecutable,
+        args,
         {
-          cwd: this.workspaceRoot,
+          cwd: options.cwd ?? this.workspaceRoot,
           env,
           windowsHide: true,
           shell: false,
         },
       );
+      const trackBusy = options.trackBusy ?? true;
       this.activeProcesses.add(child);
-      if (requestPayload.action === 'run') this.runProcesses.add(child);
+      if (trackBusy) this.runProcesses.add(child);
       child.once('close', () => {
         this.activeProcesses.delete(child);
         this.runProcesses.delete(child);
@@ -603,7 +716,11 @@ export class ModelResearchRunner {
         finish(undefined, parsedProtocolEvent.data);
       });
 
-      child.stdin.end(JSON.stringify(requestPayload) + '\n');
+      if (requestPayload !== null) {
+        child.stdin.end(JSON.stringify(requestPayload) + '\n');
+      } else {
+        child.stdin.end();
+      }
     });
   }
 

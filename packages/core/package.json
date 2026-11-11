@@ -13,7 +13,8 @@
     "./auto/*": "./src/auto/*.ts",
     "./backtest/*": "./src/backtest/*.ts",
     "./orders/*": "./src/orders/*.ts",
-    "./indicators/*": "./src/indicators/*.ts"
+    "./indicators/*": "./src/indicators/*.ts",
+    "./modelPaper/*": "./src/modelPaper/*.ts"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",

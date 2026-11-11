@@ -6,7 +6,7 @@ import tseslint from 'typescript-eslint';
 import { defineConfig, globalIgnores } from 'eslint/config';
 
 export default defineConfig([
-  globalIgnores(['dist', '**/dist', '**/dist-desktop', 'data', 'tests/fixtures', 'apps/web/tests/fixtures', '.venv', '**/.pytest_cache', 'research', 'reviews', 'artifacts']),
+  globalIgnores(['dist', '**/dist', '**/dist-desktop', 'data', 'data-reruns', 'tests/fixtures', 'apps/web/tests/fixtures', '.venv', '.benchmark-envs', '.benchmark-cache', '.benchmark-tmp', '**/.pytest_cache', 'research', 'reviews', 'artifacts']),
   {
     files: ['packages/**/*.ts', 'apps/collector/**/*.ts'],
     extends: [

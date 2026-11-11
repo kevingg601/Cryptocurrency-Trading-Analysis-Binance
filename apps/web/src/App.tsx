@@ -1113,7 +1113,7 @@ export default function App() {
 
         {/* Portfolio View */}
         {activeTab === 'portfolio' && (
-          <Portfolio tickers={tickers} coins={coins} marketType={marketType} />
+          <Portfolio tickers={tickers} coins={coins} marketType={marketType} theme={theme} />
         )}
 
         {/* Data Center View */}

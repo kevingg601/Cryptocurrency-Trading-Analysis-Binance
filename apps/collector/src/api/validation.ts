@@ -89,16 +89,64 @@ export function installValidation(app: FastifyInstance) {
     } };
     if (route.method === 'POST' && route.url === '/api/research/run') body = {
       type: 'object', additionalProperties: false, properties: {
-        kronosModel: { type: 'string', enum: ['small', 'base'] },
+        kronosModel: { type: 'string', enum: ['small', 'base', 'chronos2'] },
         market: { type: 'string', enum: ['spot', 'futures'] },
         cutoffTime: time,
       },
     };
-    route.schema = { ...route.schema, querystring: { type: 'object', properties },
+    if (route.method === 'POST' && route.url === '/api/research/pipeline/retrain-chronos') body = {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        retrainIntervalHours: { type: 'integer', minimum: 1, maximum: 168 },
+      },
+    };
+    if (route.method === 'POST' && route.url === '/api/model-paper/experiments') body = {
+      type: 'object',
+      required: ['requestId'],
+      additionalProperties: false,
+      properties: {
+        requestId: { type: 'string', pattern: '^[A-Za-z0-9_-]{8,80}$' },
+        adapterRunDir: { type: 'string', minLength: 1, maxLength: 500 },
+        retrainIntervalHours: { type: 'integer', minimum: 1, maximum: 168 },
+      },
+    };
+    if (
+      route.method === 'POST'
+      && (
+        route.url === '/api/model-paper/experiments/:id/pause'
+        || route.url === '/api/model-paper/experiments/:id/resume'
+        || route.url === '/api/model-paper/experiments/:id/stop'
+      )
+    ) body = {
+      type: 'object',
+      required: ['requestId'],
+      additionalProperties: false,
+      properties: {
+        requestId: { type: 'string', pattern: '^[A-Za-z0-9_-]{8,80}$' },
+      },
+    };
+    const querystringSchema = route.method === 'GET' && route.url === '/api/model-paper/experiments/:id/export'
+      ? {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            ...properties,
+            kind: { type: 'string', enum: ['decisions', 'fills', 'equity', 'config', 'all'] },
+            format: { type: 'string', enum: ['csv', 'json'] },
+          },
+        }
+      : { type: 'object', properties };
+    route.schema = { ...route.schema, querystring: querystringSchema,
       ...(route.url === '/api/paper/:market' ? { params: { type: 'object', required: ['market'], properties: { market } } } : {}),
       ...(route.url === '/api/ai/snapshots/:id' || route.url === '/api/ab/batches/:id' || route.url === '/api/ab/batches/:id/export.csv'
         || route.url === '/api/ab/batches/:id/claim' || route.url === '/api/ab/batches/:id/lease'
         || route.url === '/api/research/jobs/:id'
+        || route.url === '/api/model-paper/experiments/:id'
+        || route.url === '/api/model-paper/experiments/:id/pause'
+        || route.url === '/api/model-paper/experiments/:id/resume'
+        || route.url === '/api/model-paper/experiments/:id/stop'
+        || route.url === '/api/model-paper/experiments/:id/export'
         ? { params: { type: 'object', required: ['id'], properties: { id: { type: 'string', minLength: 1 } } } } : {}),
       ...(body ? { body } : {}),
     };

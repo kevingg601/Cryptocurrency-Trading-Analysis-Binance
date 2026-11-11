@@ -29,6 +29,9 @@ import { abStorageTransaction } from '../ai/abStorage.ts';
 import { AB_SERVICE_GENERATION, activateABOwnershipGeneration, claimABLease, ensureABOwnership, getABLease, ownsABLease, renewABLease } from '../ai/abOwnership.ts';
 import { AIScopeStore } from '../ai/scopeStore.ts';
 import { ModelResearchRunner, ModelResearchBusyError } from '../research/modelResearchRunner.ts';
+import { TradeBus } from '../modelPaper/tradeBus.ts';
+import { ModelPaperHttpError, ModelPaperService } from '../modelPaper/service.ts';
+import type { RollingModelPipeline } from '../modelPaper/rollingPipeline.ts';
 
 export interface ServerOptions {
   client: DuckDBClient;
@@ -45,6 +48,9 @@ export interface ServerOptions {
   aiAggregator?: AIDataAggregator;
   cliRunner?: AICLIRunner;
   researchRunner?: ModelResearchRunner;
+  tradeBus?: TradeBus;
+  modelPaperService?: ModelPaperService;
+  rollingPipeline?: RollingModelPipeline;
 }
 
 function safeInteger(value: unknown, field: string): number {
@@ -88,6 +94,17 @@ export function createServer(options: ServerOptions) {
   const aiAggregator = options.aiAggregator ?? new AIDataAggregator({ client });
   const cliRunner = options.cliRunner ?? new AICLIRunner({ client });
   const researchRunner = options.researchRunner ?? new ModelResearchRunner({ dataDir });
+  const tradeBus = options.tradeBus ?? new TradeBus();
+  const ownsModelPaperService = !options.modelPaperService;
+  const modelPaperService = options.modelPaperService ?? new ModelPaperService({
+    client,
+    dataDir: researchRunner.dataDir,
+    workspaceRoot: researchRunner.workspaceRoot,
+    runner: researchRunner,
+    tradeBus,
+    rollingPipeline: options.rollingPipeline,
+  });
+  const rollingPipeline = options.rollingPipeline ?? researchRunner.getRollingPipeline() ?? modelPaperService.rollingPipeline;
   const aiScopeStore = new AIScopeStore(client);
   const saveAtomically = abStorageTransaction(client);
   const ownershipReady = saveAtomically(connection => activateABOwnershipGeneration(connection, AB_SERVICE_GENERATION));
@@ -106,6 +123,9 @@ export function createServer(options: ServerOptions) {
   app.register(cors, { origin: (origin, callback) => callback(null, trustedOrigin(origin)) });
   installValidation(app);
   app.addHook('preClose', async () => {
+    if (ownsModelPaperService) {
+      await modelPaperService.stop();
+    }
     liveHub.close();
     researchRunner.close();
   });
@@ -887,9 +907,31 @@ export function createServer(options: ServerOptions) {
     return csv;
   });
 
-  // Model Research Routes (LightGBM Ranking + Kronos Forecasting)
+  // Model Research Routes (LightGBM Ranking + Kronos / Chronos-2 Rolling Pipeline)
   routes.get('/api/research/status', async () => {
     return researchRunner.getStatus();
+  });
+
+  routes.get('/api/research/pipeline', async () => {
+    return rollingPipeline.getStatus();
+  });
+
+  routes.post('/api/research/pipeline/retrain-chronos', async (req, reply) => {
+    const body = (req.body as { retrainIntervalHours?: number } | undefined) || {};
+    if (rollingPipeline.isBusyTrainingChronos() || researchRunner.isBusy()) {
+      return reply.status(409).send({ error: '模型推論或 GPU 重訓工作目前忙碌中，請稍候' });
+    }
+    const jobPromise = rollingPipeline.triggerChronosRetrain({
+      reason: 'manual',
+      force: true,
+      retrainIntervalHours: body.retrainIntervalHours,
+    });
+    void jobPromise.catch(() => {});
+    return reply.status(202).send({
+      started: true,
+      isTraining: true,
+      message: '已於背景啟動本機 GPU Chronos-2 LoRA 重訓，訓練期間原有推論版本維持有效',
+    });
   });
 
   routes.get('/api/research/latest', async () => {
@@ -915,8 +957,8 @@ export function createServer(options: ServerOptions) {
         error: '模型選幣研究僅支援 Binance USDT 永續合約（futures），不支援現貨模式',
       });
     }
-    if (body.kronosModel !== undefined && body.kronosModel !== 'small' && body.kronosModel !== 'base') {
-      return reply.status(400).send({ error: 'kronosModel 必須為 small 或 base' });
+    if (body.kronosModel !== undefined && body.kronosModel !== 'small' && body.kronosModel !== 'base' && body.kronosModel !== 'chronos2') {
+      return reply.status(400).send({ error: 'kronosModel 必須為 small、base 或 chronos2' });
     }
     if (body.cutoffTime !== undefined && (
       typeof body.cutoffTime !== 'number' || !Number.isSafeInteger(body.cutoffTime)
@@ -924,7 +966,7 @@ export function createServer(options: ServerOptions) {
     )) {
       return reply.status(400).send({ error: 'cutoffTime 必須為非負且不晚於目前時間的整數毫秒時間戳' });
     }
-    const kronosModel = body.kronosModel === 'base' ? 'base' : 'small';
+    const kronosModel = body.kronosModel === 'chronos2' ? 'chronos2' : body.kronosModel === 'base' ? 'base' : 'small';
     try {
       const job = researchRunner.startRunJob({
         kronosModel,
@@ -957,6 +999,97 @@ export function createServer(options: ServerOptions) {
       return reply.status(404).send({ error: '找不到指定的研究推論工作 (Job not found)' });
     }
     return job;
+  });
+
+  const handleModelPaperError = (reply: any, err: unknown) => {
+    if (err instanceof ModelPaperHttpError) {
+      return reply.status(err.statusCode).send({ error: err.message });
+    }
+    const msg = err instanceof Error ? err.message : String(err);
+    return reply.status(500).send({ error: `模型前向測試操作失敗：${msg}` });
+  };
+
+  routes.get('/api/model-paper/adapters', async (_req, reply) => {
+    try {
+      return modelPaperService.listAdapters();
+    } catch (err) {
+      return handleModelPaperError(reply, err);
+    }
+  });
+
+  routes.post('/api/model-paper/experiments', async (req, reply) => {
+    try {
+      const body = (req.body as { requestId?: string; adapterRunDir?: string; retrainIntervalHours?: number } | undefined) ?? {};
+      return await modelPaperService.createExperiment({
+        requestId: body.requestId ?? '',
+        adapterRunDir: body.adapterRunDir,
+        retrainIntervalHours: body.retrainIntervalHours,
+      });
+    } catch (err) {
+      return handleModelPaperError(reply, err);
+    }
+  });
+
+  routes.get('/api/model-paper/experiments', async (_req, reply) => {
+    try {
+      return { experiments: await modelPaperService.listExperiments() };
+    } catch (err) {
+      return handleModelPaperError(reply, err);
+    }
+  });
+
+  routes.get('/api/model-paper/experiments/:id', async (req, reply) => {
+    try {
+      const id = (req.params as any).id as string;
+      return await modelPaperService.getExperimentDetail(id);
+    } catch (err) {
+      return handleModelPaperError(reply, err);
+    }
+  });
+
+  routes.post('/api/model-paper/experiments/:id/pause', async (req, reply) => {
+    try {
+      const id = (req.params as any).id as string;
+      const body = req.body as { requestId: string };
+      return await modelPaperService.controlExperiment(id, 'pause', body.requestId);
+    } catch (err) {
+      return handleModelPaperError(reply, err);
+    }
+  });
+
+  routes.post('/api/model-paper/experiments/:id/resume', async (req, reply) => {
+    try {
+      const id = (req.params as any).id as string;
+      const body = req.body as { requestId: string };
+      return await modelPaperService.controlExperiment(id, 'resume', body.requestId);
+    } catch (err) {
+      return handleModelPaperError(reply, err);
+    }
+  });
+
+  routes.post('/api/model-paper/experiments/:id/stop', async (req, reply) => {
+    try {
+      const id = (req.params as any).id as string;
+      const body = req.body as { requestId: string };
+      return await modelPaperService.controlExperiment(id, 'stop', body.requestId);
+    } catch (err) {
+      return handleModelPaperError(reply, err);
+    }
+  });
+
+  routes.get('/api/model-paper/experiments/:id/export', async (req, reply) => {
+    try {
+      const id = (req.params as any).id as string;
+      const query = (req.query as any) || {};
+      const kind = (query.kind || 'all') as 'decisions' | 'fills' | 'equity' | 'config' | 'all';
+      const format = (query.format || (kind === 'all' ? 'json' : 'csv')) as 'csv' | 'json';
+      const result = await modelPaperService.exportExperiment(id, kind, format);
+      reply.header('Content-Type', result.contentType);
+      reply.header('Content-Disposition', `attachment; filename="${result.filename}"`);
+      return reply.send(result.body);
+    } catch (err) {
+      return handleModelPaperError(reply, err);
+    }
   });
 
   // WS /live

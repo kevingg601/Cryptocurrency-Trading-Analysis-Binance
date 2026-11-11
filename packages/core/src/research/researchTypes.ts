@@ -1,6 +1,6 @@
 import type { MarketType } from '../market/types.ts';
 
-export type KronosModelKey = 'small' | 'base';
+export type KronosModelKey = 'small' | 'base' | 'chronos2';
 
 export type ResearchRunValidityStatus =
   | 'UNCONFIGURED'
@@ -89,6 +89,8 @@ export interface KronosSymbolForecast {
   };
   historicalCandles: KronosCandlePoint[];
   predictedCandles: KronosCandlePoint[];
+  forecastType?: 'close';
+  predictedCloses?: { step: number; openTime: number; closeTime: number; close: number }[];
   dispersionDisclaimer: string;
 }
 
@@ -102,6 +104,10 @@ export interface ResearchModelSummary {
   lightgbm: {
     family: string;
     device: string;
+    versionId?: string | null;
+    trainedAt?: number | null;
+    valNdcg5Long?: number | null;
+    valNdcg5Short?: number | null;
     longSha256: string;
     shortSha256: string;
     selectedParamsLong: Record<string, unknown>;
@@ -110,6 +116,9 @@ export interface ResearchModelSummary {
   };
   kronos: {
     modelKey: KronosModelKey;
+    versionId?: string | null;
+    trainedAt?: number | null;
+    valReturnMae?: number | null;
     repoId: string;
     revision: string;
     modelSha256?: string | null;
@@ -130,6 +139,60 @@ export interface ResearchModelSummary {
       allocatedVramMb?: number;
       reservedVramMb?: number;
     };
+  };
+}
+
+export interface RollingLgbmStatus {
+  ready: boolean;
+  versionId?: string | null;
+  trainedAt?: number | null;
+  cutoffTime?: number | null;
+  longSha256?: string | null;
+  shortSha256?: string | null;
+  valNdcg5Long?: number | null;
+  valNdcg5Short?: number | null;
+  elapsedMs?: number | null;
+  trainRows?: number | null;
+  valRows?: number | null;
+}
+
+export interface RollingChronosStatus {
+  ready: boolean;
+  installed?: boolean;
+  reason?: string | null;
+  versionId?: string | null;
+  trainedAt?: number | null;
+  cutoffTime?: number | null;
+  valReturnMae?: number | null;
+  valDirectionHitRate?: number | null;
+  peakVramAllocatedMb?: number | null;
+  elapsedSeconds?: number | null;
+  dtype?: string | null;
+  baseRepoId?: string;
+  baseRevision?: string | null;
+  adapterSha256?: string | null;
+  retrainIntervalHours?: number;
+  nextRetrainAt?: number | null;
+  isTraining?: boolean;
+  lastError?: string | null;
+}
+
+export interface RollingPipelineStatus {
+  mode: 'local-rolling';
+  windowDays: number;
+  datasetReady: boolean;
+  datasetVersion?: string | null;
+  lastCutoffTime?: number | null;
+  universeSymbols: string[];
+  lgbm: RollingLgbmStatus;
+  chronos2: RollingChronosStatus;
+  autoSchedule?: {
+    enabled: boolean;
+    nextRunAt: number | null;
+    lastAttemptAt?: number | null;
+    lastSuccessAt?: number | null;
+    lastError?: string | null;
+    isTrainingChronos?: boolean;
   };
 }
 
@@ -281,6 +344,20 @@ export interface ModelResearchStatusResponse {
   insufficientSymbols: ResearchInsufficientSymbol[];
   lightgbmReady: boolean;
   lightgbmMetadata?: Record<string, any> | null;
+  chronos2?: {
+    installed: boolean;
+    reason?: string | null;
+    repoId?: string;
+    revision?: string | null;
+    runId?: string | null;
+    versionId?: string | null;
+    trainedAt?: number | null;
+    valReturnMae?: number | null;
+    nextRetrainAt?: number | null;
+    isTraining?: boolean;
+    lastError?: string | null;
+  };
+  rollingPipeline?: RollingPipelineStatus | null;
   kronosModels: {
     small: {
       modelKey: 'small';
@@ -370,7 +447,9 @@ export function deriveResearchPanelState(input: DeriveResearchPanelStateInput): 
   if (!statusData.datasetReady) return 'EMPTY';
 
   const selectedModelInstalled =
-    selectedKronosModel === 'base'
+    selectedKronosModel === 'chronos2'
+      ? statusData.chronos2?.installed
+      : selectedKronosModel === 'base'
       ? statusData.kronosModels?.base?.installed
       : statusData.kronosModels?.small?.installed;
 

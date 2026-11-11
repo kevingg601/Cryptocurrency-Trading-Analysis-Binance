@@ -153,3 +153,152 @@ CREATE TABLE IF NOT EXISTS ab_trading_batches (
   payload     VARCHAR NOT NULL, -- JSON string with encoded Infinity
   updated_at  BIGINT  NOT NULL
 );
+
+-- 模型虛擬帳戶前向測試（Chronos-2 / LightGBM A/B）
+CREATE TABLE IF NOT EXISTS model_paper_experiments (
+  id VARCHAR PRIMARY KEY,
+  created_at BIGINT,
+  status VARCHAR,
+  config_json VARCHAR,
+  model_key VARCHAR,
+  model_source_json VARCHAR,
+  universe_json VARCHAR,
+  started_at BIGINT,
+  stopped_at BIGINT,
+  heartbeat_at BIGINT,
+  status_reason VARCHAR
+);
+
+CREATE TABLE IF NOT EXISTS model_paper_accounts (
+  experiment_id VARCHAR,
+  account VARCHAR,
+  cash DOUBLE,
+  reserved DOUBLE,
+  realized_pnl DOUBLE,
+  fees DOUBLE,
+  funding DOUBLE,
+  bankrupt BOOLEAN,
+  degraded BOOLEAN,
+  funding_pending BOOLEAN,
+  stopped_this_hour_json VARCHAR,
+  updated_at BIGINT,
+  PRIMARY KEY (experiment_id, account)
+);
+
+CREATE TABLE IF NOT EXISTS model_paper_decisions (
+  id VARCHAR PRIMARY KEY,
+  experiment_id VARCHAR,
+  model_key VARCHAR,
+  decision_hour BIGINT,
+  status VARCHAR,
+  attempts INTEGER,
+  reason VARCHAR,
+  snapshot_path VARCHAR,
+  snapshot_hash VARCHAR,
+  signals_json VARCHAR,
+  created_at BIGINT,
+  submitted_at BIGINT,
+  UNIQUE (experiment_id, model_key, decision_hour)
+);
+
+CREATE TABLE IF NOT EXISTS model_paper_orders (
+  id VARCHAR PRIMARY KEY,
+  experiment_id VARCHAR,
+  account VARCHAR,
+  decision_id VARCHAR,
+  symbol VARCHAR,
+  side VARCHAR,
+  action VARCHAR,
+  reason VARCHAR,
+  qty DOUBLE,
+  ref_price DOUBLE,
+  created_at BIGINT,
+  status VARCHAR,
+  cancel_reason VARCHAR,
+  position_id VARCHAR
+);
+
+CREATE TABLE IF NOT EXISTS model_paper_fills (
+  order_id VARCHAR PRIMARY KEY,
+  experiment_id VARCHAR,
+  account VARCHAR,
+  symbol VARCHAR,
+  agg_id BIGINT,
+  trade_time BIGINT,
+  received_at BIGINT,
+  raw_price DOUBLE,
+  fill_price DOUBLE,
+  qty DOUBLE,
+  fee DOUBLE,
+  slippage_cost DOUBLE,
+  realized_pnl DOUBLE,
+  position_id VARCHAR
+);
+
+CREATE TABLE IF NOT EXISTS model_paper_positions (
+  id VARCHAR PRIMARY KEY,
+  experiment_id VARCHAR,
+  account VARCHAR,
+  symbol VARCHAR,
+  side VARCHAR,
+  qty DOUBLE,
+  entry_price DOUBLE,
+  stop_price DOUBLE,
+  opened_at BIGINT,
+  opened_decision_hour BIGINT,
+  closed_at BIGINT,
+  exit_price DOUBLE,
+  exit_reason VARCHAR,
+  status VARCHAR
+);
+
+CREATE TABLE IF NOT EXISTS model_paper_funding (
+  settlement_id VARCHAR PRIMARY KEY,
+  experiment_id VARCHAR,
+  account VARCHAR,
+  position_id VARCHAR,
+  symbol VARCHAR,
+  funding_time BIGINT,
+  rate DOUBLE,
+  mark_price DOUBLE,
+  qty DOUBLE,
+  amount DOUBLE,
+  during_gap BOOLEAN
+);
+
+CREATE TABLE IF NOT EXISTS model_paper_equity (
+  experiment_id VARCHAR,
+  account VARCHAR,
+  ts BIGINT,
+  equity DOUBLE,
+  cash DOUBLE,
+  reserved DOUBLE,
+  unrealized DOUBLE,
+  complete BOOLEAN,
+  PRIMARY KEY (experiment_id, account, ts)
+);
+
+CREATE TABLE IF NOT EXISTS model_paper_gaps (
+  id VARCHAR PRIMARY KEY,
+  experiment_id VARCHAR,
+  account VARCHAR,
+  kind VARCHAR,
+  started_at BIGINT,
+  ended_at BIGINT,
+  detail VARCHAR
+);
+
+CREATE TABLE IF NOT EXISTS model_paper_control_requests (
+  request_id VARCHAR PRIMARY KEY,
+  experiment_id VARCHAR,
+  action VARCHAR,
+  created_at BIGINT,
+  result_json VARCHAR
+);
+
+CREATE TABLE IF NOT EXISTS model_paper_leases (
+  experiment_id VARCHAR PRIMARY KEY,
+  owner_token VARCHAR,
+  generation BIGINT,
+  expires_at BIGINT
+);

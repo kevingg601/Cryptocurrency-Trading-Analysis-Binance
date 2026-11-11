@@ -1007,8 +1007,8 @@ def test_worker_no_forecasts_is_insufficient_and_keeps_latest(tmp_path, monkeypa
         "targetSymbols": ["TESTUSDT"], "totalElapsedMs": 0, "peakVramAllocatedMb": 0,
         "peakVramReservedMb": 0, "gpuEnv": {}, "skippedSymbols": [{"symbol": "TESTUSDT", "reason": "gap"}],
     })
-    result = worker.handle_run({"dataDir": str(tmp_path), "runId": "run-insufficient"})
-    assert isinstance(cutoffs[0], int)  # default cutoff excludes future/unclosed candles
+    result = worker.handle_run({"dataDir": str(tmp_path), "runId": "run-insufficient", "cutoffTime": 40 * ONE_HOUR_MS})
+    assert cutoffs[0] == 40 * ONE_HOUR_MS  # explicit historical cutoff avoids live refresh
     assert result["status"] == "INSUFFICIENT_DATA"
     assert json.loads(pointer.read_text(encoding="utf-8"))["runId"] == "run-previous"
     assert (data / "run-insufficient" / "manifest.json").exists()
