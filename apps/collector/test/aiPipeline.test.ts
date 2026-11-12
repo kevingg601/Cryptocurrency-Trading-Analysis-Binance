@@ -303,3 +303,33 @@ test('snapshot keeps essential market valid while excluding stale daily on-chain
   assert.equal(result.sources.news, false);
   assert.equal(result.sources.liquidations, true);
 });
+
+test('snapshot refreshes via REST when DuckDB has stale tail or an old gap even with >= 20 rows', async () => {
+  const now = Date.now();
+  const lastOpen = Math.floor(now / 60_000) * 60_000 - 60_000;
+  // DuckDB has 25 stale rows ending 5 minutes ago -> length >= 20, yet stale!
+  const staleRows = Array.from({ length: 25 }, (_, index) => {
+    const openTime = lastOpen - 300_000 - (24 - index) * 60_000;
+    return { open_time: openTime, open: 10, high: 11, low: 9, close: 10, volume: 5 };
+  });
+  let restCalls = 0;
+  const freshRestRaw = Array.from({ length: 30 }, (_, index) => {
+    const openTime = lastOpen - (29 - index) * 60_000;
+    return [openTime, '12', '13', '11', '12.5', '100'];
+  });
+  const aggregator = new AIDataAggregator({
+    client: { all: async () => staleRows, run: async () => {}, exec: async () => {}, close: async () => {} } as any,
+    derivativesSource: new BinanceDerivativesSource(async () => new Response('[]', { status: 200 })),
+    newsSource: new RSSNewsSource(async () => new Response('<rss><channel></channel></rss>', { status: 200 })),
+    coinMetricsSource: new CoinMetricsSource(async () => new Response('{}', { status: 200 })),
+    fetchKlines: async () => {
+      restCalls += 1;
+      return freshRestRaw;
+    },
+  });
+  const snap = await aggregator.buildSnapshot('SUIUSDT', 'futures', now);
+  assert.equal(restCalls, 1);
+  assert.equal(snap.essentialDataValid, true);
+  assert.equal(snap.klines.length, 30);
+  assert.equal(snap.market.price, 12.5);
+});

@@ -268,7 +268,12 @@ export function resolveChronosPythonBin(workspaceRoot: string, override?: string
 export function inspectLocalRollingStatus(
   dataDir: string,
   workspaceRoot: string,
-  opts: { chronosPython?: string; isTrainingChronos?: boolean; retrainIntervalHours?: number } = {},
+  opts: {
+    chronosPython?: string;
+    isTrainingChronos?: boolean;
+    retrainIntervalHours?: number;
+    chronosTrainingPaused?: boolean;
+  } = {},
 ): RollingPipelineStatus {
   const liveRoot = path.join(path.resolve(dataDir), 'model-live');
   const datasetsDir = path.join(liveRoot, 'datasets');
@@ -284,6 +289,8 @@ export function inspectLocalRollingStatus(
   );
 
   const lgbmCur = readJsonSafe(path.join(lgbmRoot, 'current.json'));
+  const lgbmLatestRanking = readJsonSafe(path.join(lgbmRoot, 'latest-ranking.json'));
+  const lgbmRankingError = readJsonSafe(path.join(lgbmRoot, 'ranking_error.json'));
   const lgbmVersionId = typeof lgbmCur?.versionId === 'string' && !lgbmCur.versionId.includes('..') && !/[\\/]/.test(lgbmCur.versionId)
     ? lgbmCur.versionId
     : null;
@@ -358,13 +365,30 @@ export function inspectLocalRollingStatus(
         ? trainedAt + retrainHours * 3_600_000
         : null;
 
+  const universeFallback =
+    readJsonSafe(path.join(datasetsDir, 'universe.json'))?.symbols
+    ?? readJsonSafe(path.join(path.resolve(dataDir), 'model-research', 'datasets', 'universe.json'))?.symbols
+    ?? readJsonSafe(path.join(path.resolve(dataDir), 'model-research', 'datasets', 'dataset_manifest.json'))?.universe?.symbols
+    ?? [];
+  const universeSymbols = Array.isArray(datasetState?.universeSymbols) && datasetState.universeSymbols.length > 0
+    ? datasetState.universeSymbols
+    : Array.isArray(universeFallback)
+      ? universeFallback
+      : [];
+  const paused = opts.chronosTrainingPaused ?? true;
+
   return {
     mode: 'local-rolling',
     windowDays: Number(datasetState?.windowDays || 180),
     datasetReady,
     datasetVersion: datasetState?.datasetVersion ?? null,
     lastCutoffTime: typeof datasetState?.lastCutoffTime === 'number' ? datasetState.lastCutoffTime : null,
-    universeSymbols: Array.isArray(datasetState?.universeSymbols) ? datasetState.universeSymbols : [],
+    universeSymbols,
+    trainingPaused: paused,
+    pausedModels: paused ? ['chronos2', 'kronos-small', 'kronos-base'] : [],
+    pausedReason: paused
+      ? '目前暫停 Chronos-2 及其他非 LightGBM 模型訓練，僅執行 LightGBM 每小時獨立更新與排名發布'
+      : null,
     lgbm: {
       ready: lgbmReady,
       versionId: lgbmReady ? lgbmVersionId : null,
@@ -377,10 +401,17 @@ export function inspectLocalRollingStatus(
       elapsedMs: typeof lgbmCur?.elapsedMs === 'number' ? lgbmCur.elapsedMs : null,
       trainRows: typeof lgbmCur?.trainRows === 'number' ? lgbmCur.trainRows : null,
       valRows: typeof lgbmCur?.valRows === 'number' ? lgbmCur.valRows : null,
+      lastRankingSnapshotId: lgbmLatestRanking?.snapshotId ?? null,
+      lastRankingPublishedAt: typeof lgbmLatestRanking?.publishedAt === 'number' ? lgbmLatestRanking.publishedAt : null,
+      lastRankingCutoffTime: typeof lgbmLatestRanking?.cutoffTime === 'number' ? lgbmLatestRanking.cutoffTime : null,
+      lastRankingExpiresAt: typeof lgbmLatestRanking?.expiresAt === 'number' ? lgbmLatestRanking.expiresAt : null,
+      lastRankingError: lgbmRankingError?.error ?? null,
+      trainAudit: lgbmLatestRanking?.trainAudit ?? null,
     },
     chronos2: {
       ready: chronosReady,
       installed: chronosReady,
+      paused,
       reason: chronosReason,
       versionId: chronosReady ? String(chronosCur.versionId) : (chronosCur?.versionId ?? null),
       trainedAt,

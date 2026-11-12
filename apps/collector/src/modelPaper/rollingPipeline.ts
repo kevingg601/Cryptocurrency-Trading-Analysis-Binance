@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
-import type { HourlyModelVersions, RollingPipelineStatus } from '@fadachi/core';
+import type { HourlyModelVersions, LightgbmRankSnapshot, RollingPipelineStatus } from '@fadachi/core';
 import { ModelResearchBusyError, ModelResearchRunner } from '../research/modelResearchRunner.ts';
 import { inspectLocalRollingStatus, resolveChronosPythonBin } from './adapters.ts';
 import type { Chronos2LiveOutput, ForwardRankOutput } from './forwardInference.ts';
@@ -14,6 +14,14 @@ const DEFAULT_RETRAIN_INTERVAL_HOURS = 6;
 const DEFAULT_RETRY_MS = 30_000;
 const DEFAULT_DEADLINE_MS = 600_000;
 const DEFAULT_BG_TRAIN_MARGIN_MS = 28 * 60_000;
+
+export class ChronosTrainingPausedError extends Error {
+  readonly errorCode = 'TRAINING_PAUSED';
+  constructor(message = '目前暫停 Chronos-2 及其他非 LightGBM 模型訓練，僅執行 LightGBM 每小時獨立更新與排名發布') {
+    super(message);
+    this.name = 'ChronosTrainingPausedError';
+  }
+}
 
 export interface RollingCycleOutput {
   snapshotDir: string;
@@ -41,6 +49,8 @@ export interface RollingModelPipelineOptions {
   chronosPython?: string;
   clock?: SchedulerClock;
   autoHourlyEnabled?: boolean;
+  autoLgbmHourlyEnabled?: boolean;
+  chronosTrainingPaused?: boolean;
   runOnStart?: boolean;
   retrainIntervalHours?: number;
   rankTimeoutMs?: number;
@@ -48,6 +58,7 @@ export interface RollingModelPipelineOptions {
   chronosTrainTimeoutMs?: number;
   backgroundTrainMarginMs?: number;
   onHourCompleted?: (output: RollingCycleOutput) => void;
+  onLgbmRankingPublished?: (snapshot: LightgbmRankSnapshot) => void;
 }
 
 export class RollingModelPipeline {
@@ -57,6 +68,8 @@ export class RollingModelPipeline {
   readonly chronosPython: string;
   readonly clock: SchedulerClock;
   readonly autoHourlyEnabled: boolean;
+  readonly autoLgbmHourlyEnabled: boolean;
+  readonly chronosTrainingPaused: boolean;
   readonly runOnStart: boolean;
   readonly retrainIntervalHours: number;
   readonly rankTimeoutMs: number;
@@ -64,6 +77,7 @@ export class RollingModelPipeline {
   readonly chronosTrainTimeoutMs: number;
   readonly backgroundTrainMarginMs: number;
   private readonly onHourCompleted?: (output: RollingCycleOutput) => void;
+  private readonly onLgbmRankingPublished?: (snapshot: LightgbmRankSnapshot) => void;
 
   private started = false;
   private hourlyTimer: unknown | null = null;
@@ -74,12 +88,18 @@ export class RollingModelPipeline {
   private lastError: string | null = null;
   private lastCompletedHourH: number | null = null;
   private lastCachedCycle: {
-    targetHourH: number;
-    chronosVersionId: string | null;
+    cacheKey: string;
     output: RollingCycleOutput;
   } | null = null;
 
-  private readonly inFlightHours = new Map<number, Promise<RollingCycleOutput>>();
+  private lgbmLastAttemptAt: number | null = null;
+  private lgbmLastSuccessAt: number | null = null;
+  private lgbmLastError: string | null = null;
+  private lastLgbmCompletedHourH: number | null = null;
+  private lastLgbmSnapshot: LightgbmRankSnapshot | null = null;
+  private readonly inFlightLgbmHours = new Map<string, Promise<LightgbmRankSnapshot>>();
+
+  private readonly inFlightHours = new Map<string, Promise<RollingCycleOutput>>();
   private readonly activePromises = new Set<Promise<unknown>>();
   private isTrainingChronos = false;
   private activeTrainPromise: Promise<Record<string, unknown>> | null = null;
@@ -91,6 +111,8 @@ export class RollingModelPipeline {
     this.chronosPython = resolveChronosPythonBin(this.workspaceRoot, options.chronosPython);
     this.clock = options.clock ?? defaultSchedulerClock;
     this.autoHourlyEnabled = options.autoHourlyEnabled ?? true;
+    this.chronosTrainingPaused = options.chronosTrainingPaused ?? true;
+    this.autoLgbmHourlyEnabled = options.autoLgbmHourlyEnabled ?? this.autoHourlyEnabled;
     this.runOnStart = options.runOnStart ?? true;
     this.retrainIntervalHours = Math.max(1, Math.trunc(options.retrainIntervalHours ?? DEFAULT_RETRAIN_INTERVAL_HOURS));
     this.rankTimeoutMs = options.rankTimeoutMs ?? 180_000;
@@ -98,6 +120,7 @@ export class RollingModelPipeline {
     this.chronosTrainTimeoutMs = options.chronosTrainTimeoutMs ?? 40 * 60_000;
     this.backgroundTrainMarginMs = options.backgroundTrainMarginMs ?? DEFAULT_BG_TRAIN_MARGIN_MS;
     this.onHourCompleted = options.onHourCompleted;
+    this.onLgbmRankingPublished = options.onLgbmRankingPublished;
   }
 
   private track<T>(promise: Promise<T>): Promise<T> {
@@ -110,18 +133,44 @@ export class RollingModelPipeline {
   start(): void {
     if (this.started) return;
     this.started = true;
-    if (!this.autoHourlyEnabled) return;
+    if (!this.autoHourlyEnabled && !this.autoLgbmHourlyEnabled) return;
 
     this.scheduleNextHourly();
     if (this.runOnStart) {
       const now = this.clock.now();
       const currentH = Math.floor(now / ONE_HOUR_MS) * ONE_HOUR_MS - ONE_HOUR_MS;
+      const expectedCutoff = currentH + ONE_HOUR_MS;
+
+      if (this.chronosTrainingPaused) {
+        const latestLgbm = path.join(this.dataDir, 'model-live', 'models', 'lgbm', 'latest-ranking.json');
+        let lgbmFresh = false;
+        if (fs.existsSync(latestLgbm)) {
+          try {
+            const ptr = JSON.parse(fs.readFileSync(latestLgbm, 'utf8'));
+            if (ptr?.status === 'SUCCESS' && ptr.cutoffTime === expectedCutoff
+              && Number.isFinite(ptr.generatedAt) && ptr.generatedAt <= now
+              && Number.isFinite(ptr.publishedAt) && ptr.publishedAt <= now
+              && Number.isFinite(ptr.expiresAt) && now < ptr.expiresAt) {
+              lgbmFresh = true;
+              this.lastLgbmCompletedHourH = currentH;
+              this.lastLgbmSnapshot = ptr as LightgbmRankSnapshot;
+            }
+          } catch {
+            lgbmFresh = false;
+          }
+        }
+        if (!lgbmFresh && this.autoLgbmHourlyEnabled) {
+          void this.track(this.runAutoHourlyTick(currentH, now + DEFAULT_DEADLINE_MS));
+        }
+        return;
+      }
+
       const latestRun = path.join(this.dataDir, 'model-research', 'latest-run.json');
       let alreadyFresh = false;
       if (fs.existsSync(latestRun)) {
         try {
           const ptr = JSON.parse(fs.readFileSync(latestRun, 'utf8'));
-          if (typeof ptr?.cutoffTime === 'number' && ptr.cutoffTime >= currentH + ONE_HOUR_MS) {
+          if (typeof ptr?.cutoffTime === 'number' && ptr.cutoffTime >= expectedCutoff) {
             alreadyFresh = true;
           }
         } catch {
@@ -154,27 +203,86 @@ export class RollingModelPipeline {
     return this.isTrainingChronos;
   }
 
+  isTrainingPaused(): boolean {
+    return this.chronosTrainingPaused;
+  }
+
+  getLatestLightgbmRanking(now = this.clock.now()): {
+    snapshot: LightgbmRankSnapshot | null;
+    expectedCutoffTime: number;
+    isExpired: boolean;
+    matchesCurrentHour: boolean;
+    latestError: { cutoffTime?: number; failedAt?: number; error?: string } | null;
+  } {
+    const expectedCutoffTime = Math.floor(now / ONE_HOUR_MS) * ONE_HOUR_MS;
+    const lgbmDir = path.join(this.dataDir, 'model-live', 'models', 'lgbm');
+    const rankingPath = path.join(lgbmDir, 'latest-ranking.json');
+    const errPath = path.join(lgbmDir, 'ranking_error.json');
+
+    let snapshot: LightgbmRankSnapshot | null = this.lastLgbmSnapshot;
+    if (fs.existsSync(rankingPath)) {
+      try {
+        snapshot = JSON.parse(fs.readFileSync(rankingPath, 'utf8')) as LightgbmRankSnapshot;
+        this.lastLgbmSnapshot = snapshot;
+      } catch {
+        // fallback to in-memory cache
+      }
+    }
+
+    let latestError: { cutoffTime?: number; failedAt?: number; error?: string } | null = null;
+    if (fs.existsSync(errPath)) {
+      try {
+        latestError = JSON.parse(fs.readFileSync(errPath, 'utf8'));
+      } catch {
+        latestError = null;
+      }
+    }
+
+    const isExpired = snapshot
+      ? (!Number.isFinite(snapshot.expiresAt) || now >= snapshot.expiresAt || snapshot.cutoffTime !== expectedCutoffTime)
+      : true;
+    const matchesCurrentHour = Boolean(snapshot && snapshot.cutoffTime === expectedCutoffTime && now < snapshot.expiresAt);
+    return {
+      snapshot,
+      expectedCutoffTime,
+      isExpired,
+      matchesCurrentHour,
+      latestError,
+    };
+  }
+
   getStatus(): RollingPipelineStatus {
     const base = inspectLocalRollingStatus(this.dataDir, this.workspaceRoot, {
       chronosPython: this.chronosPython,
       isTrainingChronos: this.isTrainingChronos,
       retrainIntervalHours: this.retrainIntervalHours,
+      chronosTrainingPaused: this.chronosTrainingPaused,
     });
     return {
       ...base,
-      autoSchedule: {
-        enabled: this.autoHourlyEnabled && this.started,
+      lgbmAutoSchedule: {
+        enabled: this.autoLgbmHourlyEnabled && this.started,
         nextRunAt: this.nextScheduleAt,
-        lastAttemptAt: this.lastAttemptAt,
-        lastSuccessAt: this.lastSuccessAt,
-        lastError: this.lastError,
+        lastAttemptAt: this.lgbmLastAttemptAt,
+        lastSuccessAt: this.lgbmLastSuccessAt,
+        lastError: this.lgbmLastError,
+        lastCutoffTime: this.lastLgbmSnapshot?.cutoffTime ?? base.lgbm.lastRankingCutoffTime ?? null,
+        lastRankingPublishedAt: this.lastLgbmSnapshot?.publishedAt ?? base.lgbm.lastRankingPublishedAt ?? null,
+      },
+      autoSchedule: {
+        enabled: (this.chronosTrainingPaused ? this.autoLgbmHourlyEnabled : this.autoHourlyEnabled) && this.started,
+        nextRunAt: this.nextScheduleAt,
+        lastAttemptAt: this.chronosTrainingPaused ? this.lgbmLastAttemptAt : this.lastAttemptAt,
+        lastSuccessAt: this.chronosTrainingPaused ? this.lgbmLastSuccessAt : this.lastSuccessAt,
+        lastError: this.chronosTrainingPaused ? this.lgbmLastError : this.lastError,
         isTrainingChronos: this.isTrainingChronos,
+        chronosPaused: this.chronosTrainingPaused,
       },
     };
   }
 
   private scheduleNextHourly(): void {
-    if (!this.started || !this.autoHourlyEnabled) return;
+    if (!this.started || (!this.autoHourlyEnabled && !this.autoLgbmHourlyEnabled)) return;
     if (this.hourlyTimer !== null) {
       this.clock.clearTimeout(this.hourlyTimer);
       this.hourlyTimer = null;
@@ -196,8 +304,8 @@ export class RollingModelPipeline {
     }, delay);
   }
 
-  private scheduleRetry(targetH: number): void {
-    if (!this.started || !this.autoHourlyEnabled) return;
+  private scheduleRetry(targetH: number, deadline?: number): void {
+    if (!this.started || (!this.autoHourlyEnabled && !this.autoLgbmHourlyEnabled)) return;
     if (this.retryTimer !== null) {
       this.clock.clearTimeout(this.retryTimer);
       this.retryTimer = null;
@@ -205,19 +313,44 @@ export class RollingModelPipeline {
     this.retryTimer = this.clock.setTimeout(() => {
       this.retryTimer = null;
       if (!this.started) return;
-      void this.track(this.runAutoHourlyTick(targetH));
+      void this.track(this.runAutoHourlyTick(targetH, deadline));
     }, DEFAULT_RETRY_MS);
   }
 
-  private async runAutoHourlyTick(targetH: number): Promise<void> {
+  private async runAutoHourlyTick(targetH: number, retryDeadline?: number): Promise<void> {
     if (!this.started) return;
-    if (this.lastCompletedHourH !== null && this.lastCompletedHourH >= targetH) {
+
+    const now = this.clock.now();
+    const deadline = retryDeadline ?? (targetH + ONE_HOUR_MS + DEFAULT_DEADLINE_MS);
+    if (now >= deadline || targetH + ONE_HOUR_MS !== Math.floor(now / ONE_HOUR_MS) * ONE_HOUR_MS) return;
+
+    if (this.chronosTrainingPaused) {
+      if (!this.autoLgbmHourlyEnabled) return;
+      if (this.lastLgbmCompletedHourH !== null && this.lastLgbmCompletedHourH >= targetH) {
+        return;
+      }
+      this.lgbmLastAttemptAt = now;
+      try {
+        await this.runLightgbmHourlyUpdate({
+          targetHourH: targetH,
+          now,
+          skipTrainingIfSameCutoff: true,
+        });
+      } catch (err: any) {
+        this.lgbmLastError = err?.message || String(err);
+        if (
+          (err instanceof DataNotReadyError || err?.errorCode === 'DATA_NOT_READY' || err instanceof ModelResearchBusyError)
+          && this.clock.now() < deadline
+        ) {
+          this.scheduleRetry(targetH, deadline);
+        }
+      }
       return;
     }
 
-    const now = this.clock.now();
-    const deadline = targetH + ONE_HOUR_MS + DEFAULT_DEADLINE_MS;
-    if (now >= deadline) return;
+    if (this.lastCompletedHourH !== null && this.lastCompletedHourH >= targetH) {
+      return;
+    }
 
     this.lastAttemptAt = now;
     try {
@@ -236,6 +369,128 @@ export class RollingModelPipeline {
         && this.clock.now() < deadline
       ) {
         this.scheduleRetry(targetH);
+      }
+    }
+  }
+
+  async runLightgbmHourlyUpdate(params: {
+    targetHourH?: number;
+    now?: number;
+    universeSymbols?: string[];
+    force?: boolean;
+    retrainLgbm?: boolean;
+    skipTrainingIfSameCutoff?: boolean;
+    allowNetwork?: boolean;
+    lockOwnerJobId?: string;
+  } = {}): Promise<LightgbmRankSnapshot> {
+    const now = params.now ?? this.clock.now();
+    const targetHourH = params.targetHourH ?? (Math.floor(now / ONE_HOUR_MS) * ONE_HOUR_MS - ONE_HOUR_MS);
+    const targetCutoffTime = targetHourH + ONE_HOUR_MS;
+    if (!Number.isSafeInteger(targetCutoffTime) || targetCutoffTime <= 0
+      || targetCutoffTime % ONE_HOUR_MS !== 0
+      || targetCutoffTime > Math.floor(this.clock.now() / ONE_HOUR_MS) * ONE_HOUR_MS) {
+      throw new DataNotReadyError('LightGBM cutoff 必須是已收盤 UTC 整點');
+    }
+    const cacheKey = JSON.stringify({
+      targetHourH,
+      universeSymbols: [...(params.universeSymbols ?? [])].map(s => s.toUpperCase()).sort(),
+      retrainLgbm: params.retrainLgbm ?? true,
+      skipTrainingIfSameCutoff: params.skipTrainingIfSameCutoff ?? true,
+      allowNetwork: params.allowNetwork ?? true,
+    });
+
+    if (!params.force && this.lastLgbmSnapshot && this.lastLgbmSnapshot.cutoffTime === targetCutoffTime && this.lastLgbmSnapshot.status === 'SUCCESS') {
+      return structuredClone(this.lastLgbmSnapshot);
+    }
+
+    const existing = this.inFlightLgbmHours.get(cacheKey);
+    if (existing) {
+      return existing;
+    }
+
+    const promise = this.track((async () => {
+      this.lgbmLastAttemptAt = this.clock.now();
+      try {
+        const res = await this.runner.runExclusive(
+          `lgbm-hourly:${targetHourH}`,
+          async () => {
+            const raw = (await this.runner.invokeWorkerWith(
+              this.runner.pythonExecutable,
+              ['-m', 'research.model_research.worker'],
+              {
+                action: 'rolling_update_lgbm_rank',
+                dataDir: this.dataDir,
+                targetCutoffTime,
+                ...(params.universeSymbols?.length ? { universeSymbols: params.universeSymbols } : {}),
+                retrainLgbm: params.retrainLgbm ?? true,
+                skipTrainingIfSameCutoff: params.skipTrainingIfSameCutoff ?? true,
+                allowNetwork: params.allowNetwork ?? true,
+              },
+              this.rankTimeoutMs,
+            )) as Record<string, any>;
+
+            if (!raw || raw.replay === true || raw.inputMode !== 'live') {
+              throw Object.assign(new Error('拒絕使用 replay 或非即時模式之 LightGBM 排名結果'), {
+                errorCode: 'REPLAY_RESULT_REJECTED',
+              });
+            }
+            if (Number(raw.decisionOpenTime) !== targetHourH || Number(raw.cutoffTime) !== targetCutoffTime) {
+              throw new DataNotReadyError(
+                `LightGBM 排名截斷小時 (${raw.cutoffTime}) 與目標小時 (${targetCutoffTime}) 不符`,
+              );
+            }
+
+            const publishedAt = Number(raw.publishedAt ?? raw.generatedAt ?? this.clock.now());
+            const generatedAt = Number(raw.generatedAt ?? publishedAt);
+            const expiresAt = Number(raw.expiresAt ?? (targetCutoffTime + ONE_HOUR_MS));
+            const snapshot: LightgbmRankSnapshot = {
+              snapshotId: String(raw.snapshotId || `lgbm-${targetCutoffTime}-${raw.lightgbm?.versionId ?? 'active'}`),
+              status: 'SUCCESS',
+              decisionOpenTime: Number(raw.decisionOpenTime),
+              cutoffTime: Number(raw.cutoffTime),
+              generatedAt,
+              publishedAt,
+              expiresAt,
+              versionId: raw.lightgbm?.versionId ?? null,
+              longSha256: raw.lightgbm?.longSha256 ?? null,
+              shortSha256: raw.lightgbm?.shortSha256 ?? null,
+              trainedAt: raw.lightgbm?.trainedAt ?? null,
+              universeSymbols: Array.isArray(raw.universeSymbols) ? raw.universeSymbols : [],
+              eligibleCount: typeof raw.eligibleCount === 'number' ? raw.eligibleCount : undefined,
+              insufficientSymbols: Array.isArray(raw.insufficientSymbols) ? raw.insufficientSymbols : [],
+              longTop5: Array.isArray(raw.longTop5) ? raw.longTop5 : [],
+              shortTop5: Array.isArray(raw.shortTop5) ? raw.shortTop5 : [],
+              allRankings: Array.isArray(raw.allRankings) ? raw.allRankings : [],
+              conflictSymbols: Array.isArray(raw.conflictSymbols) ? raw.conflictSymbols : [],
+              reason: null,
+              trainAudit: raw.trainAudit ?? null,
+            };
+            return snapshot;
+          },
+          { allowDuringJobId: params.lockOwnerJobId },
+        );
+
+        this.lastLgbmCompletedHourH = targetHourH;
+        this.lgbmLastSuccessAt = this.clock.now();
+        this.lgbmLastError = null;
+        this.lastLgbmSnapshot = res;
+        this.onLgbmRankingPublished?.(res);
+        return res;
+      } catch (err: any) {
+        this.lgbmLastError = err?.message || String(err);
+        if (err?.errorCode === 'DATA_NOT_READY') {
+          throw new DataNotReadyError(err.message);
+        }
+        throw err;
+      }
+    })());
+
+    this.inFlightLgbmHours.set(cacheKey, promise);
+    try {
+      return await promise;
+    } finally {
+      if (this.inFlightLgbmHours.get(cacheKey) === promise) {
+        this.inFlightLgbmHours.delete(cacheKey);
       }
     }
   }
@@ -263,27 +518,39 @@ export class RollingModelPipeline {
       chronosPython: this.chronosPython,
       retrainIntervalHours: retrainHours,
     });
+    const snapshotDir = params.snapshotDir
+      ? path.resolve(params.snapshotDir)
+      : path.join(this.dataDir, 'model-live', 'cycles', String(targetHourH));
+    const cacheKey = JSON.stringify({
+      targetHourH,
+      snapshotDir,
+      universeSymbols: [...(params.universeSymbols ?? [])].map(s => s.toUpperCase()).sort(),
+      chronosVersionId: curStatus.chronos2.versionId ?? null,
+      lgbmVersionId: curStatus.lgbm.versionId ?? null,
+      retrainHours,
+      retrainLgbm: params.retrainLgbm ?? true,
+      skipTrainingIfSameCutoff: params.skipTrainingIfSameCutoff ?? false,
+      allowNetwork: params.allowNetwork ?? true,
+      commitResearch: params.commitResearch ?? false,
+      requireChronosReady: params.requireChronosReady ?? false,
+      commitRunId: params.commitRunId ?? null,
+    });
 
     if (
       !params.force
       && this.lastCachedCycle
-      && this.lastCachedCycle.targetHourH === targetHourH
-      && this.lastCachedCycle.chronosVersionId === (curStatus.chronos2.versionId ?? null)
+      && this.lastCachedCycle.cacheKey === cacheKey
     ) {
       return this.lastCachedCycle.output;
     }
 
-    const existing = this.inFlightHours.get(targetHourH);
+    const existing = this.inFlightHours.get(cacheKey);
     if (existing) {
       return existing;
     }
 
     const promise = (async () => {
       const targetCutoffTime = targetHourH + ONE_HOUR_MS;
-      const snapshotDir = params.snapshotDir
-        ? path.resolve(params.snapshotDir)
-        : path.join(this.dataDir, 'model-live', 'cycles', String(targetHourH));
-
       const execResult = await this.runner.runExclusive(
         `rolling-cycle:${targetHourH}`,
         async () => {
@@ -455,8 +722,7 @@ export class RollingModelPipeline {
         this.lastSuccessAt = this.clock.now();
         this.lastError = null;
         this.lastCachedCycle = {
-          targetHourH,
-          chronosVersionId: modelVersions.chronosVersionId ?? null,
+          cacheKey,
           output,
         };
         this.onHourCompleted?.(output);
@@ -468,7 +734,7 @@ export class RollingModelPipeline {
       { allowDuringJobId: params.lockOwnerJobId },
     );
 
-      if (params.triggerChronosRetrainIfDue && execResult.chronosDue) {
+      if (params.triggerChronosRetrainIfDue && execResult.chronosDue && !this.chronosTrainingPaused) {
         this.maybeScheduleBackgroundChronosRetrain(retrainHours, targetCutoffTime);
       }
 
@@ -481,21 +747,21 @@ export class RollingModelPipeline {
       return execResult.output;
     })();
 
-    this.inFlightHours.set(targetHourH, promise);
+    this.inFlightHours.set(cacheKey, promise);
     try {
       return await promise;
     } finally {
-      if (this.inFlightHours.get(targetHourH) === promise) {
-        this.inFlightHours.delete(targetHourH);
+      if (this.inFlightHours.get(cacheKey) === promise) {
+        this.inFlightHours.delete(cacheKey);
       }
     }
   }
 
   private maybeScheduleBackgroundChronosRetrain(retrainIntervalHours: number, cutoffTime?: number): void {
-    if (this.isTrainingChronos || this.runner.isBusy()) return;
+    if (this.chronosTrainingPaused || this.isTrainingChronos || this.runner.isBusy()) return;
     const now = this.clock.now();
     const nextHourBoundary = (Math.floor(now / ONE_HOUR_MS) + 1) * ONE_HOUR_MS;
-    if (nextHourBoundary - now < this.backgroundTrainMarginMs) {
+    if (nextHourBoundary - now < Math.max(this.backgroundTrainMarginMs, this.chronosTrainTimeoutMs + 2 * 60_000)) {
       return;
     }
     void this.track(
@@ -517,6 +783,9 @@ export class RollingModelPipeline {
     retrainIntervalHours?: number;
     maxUpdates?: number;
   } = {}): Promise<Record<string, unknown>> {
+    if (this.chronosTrainingPaused) {
+      throw new ChronosTrainingPausedError();
+    }
     if (this.isTrainingChronos || this.runner.isBusy()) {
       throw new ModelResearchBusyError('chronos2-gpu-train');
     }

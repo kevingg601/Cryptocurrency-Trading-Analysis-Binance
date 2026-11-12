@@ -16,6 +16,21 @@ const ONE_HOUR_MS = 3_600_000;
 const ONE_MINUTE_MS = 60_000;
 const MONITOR_INTERVAL_MS = 1_000;
 const MAX_SEEN_AGG_IDS_PER_SYMBOL = 10_000;
+const MAX_ACTIONABLE_QUEUE = 4_096;
+const ACTIONABLE_DRAIN_BATCH = 32;
+
+interface WatchSymbolOrder {
+  eligibleAt: number;
+  timeoutAt: number;
+  action: 'ENTRY' | 'EXIT';
+}
+
+interface WatchSymbolStop {
+  expId: string;
+  account: AccountId;
+  side: 'LONG' | 'SHORT';
+  stopPrice: number;
+}
 
 export interface ExecutorClock {
   now(): number;
@@ -72,11 +87,19 @@ export class PaperExecutor {
   private readonly onExitFilled?: PaperExecutorOptions['onExitFilled'];
   private readonly onAwaitingResume?: PaperExecutorOptions['onAwaitingResume'];
 
-  private readonly seenAggIds = new Map<string, number[]>();
   private readonly seenAggIdSets = new Map<string, Set<number>>();
   private readonly lastPosTradeAt = new Map<string, number>();
   private readonly lastEquityAt = new Map<string, number>();
   private readonly lastPrices: Record<string, number> = {};
+
+  private watchSynced = false;
+  private watchGeneration = 0;
+  private pendingWatchBySymbol = new Map<string, WatchSymbolOrder[]>();
+  private openStopsBySymbol = new Map<string, WatchSymbolStop[]>();
+  private readonly queuedActionableTrades: TradeBusTradeEvent[] = [];
+  private actionableDrainScheduled = false;
+  private overloadPending = false;
+  private monitorInFlight = false;
 
   private running = false;
   private hasStarted = false;
@@ -104,13 +127,14 @@ export class PaperExecutor {
     this.running = true;
     this.hasStarted = true;
     this.monitorGeneration += 1;
+    this.invalidateWatchCache();
     const now = this.clock.now();
     this.startedAt = now;
     const streamState = this.tradeBus.getStreamStatus();
     this.hasConnectedStream = streamState.status === 'connected' || Boolean(this.tradeBus.hasEverConnected?.());
     this.initialConnectedAt = this.hasConnectedStream ? now : 0;
     this.tradeListener = (trade) => {
-      this.enqueue(() => this.handleTrade(trade));
+      this.handleIncomingLiveTrade(trade);
     };
     this.statusListener = (status) => {
       if (status.status === 'connected' && !this.hasConnectedStream) {
@@ -120,12 +144,17 @@ export class PaperExecutor {
     };
     this.tradeBus.on('trade', this.tradeListener);
     this.tradeBus.on('status', this.statusListener);
+    this.enqueue(() => this.runMonitorTickInternal(this.clock.now()));
     this.scheduleMonitor(this.monitorGeneration);
   }
 
   stop(): void {
     this.running = false;
     this.monitorGeneration += 1;
+    this.monitorInFlight = false;
+    this.actionableDrainScheduled = false;
+    this.queuedActionableTrades.length = 0;
+    this.overloadPending = false;
     if (this.tradeListener) {
       this.tradeBus.off('trade', this.tradeListener);
       this.tradeListener = null;
@@ -140,8 +169,17 @@ export class PaperExecutor {
     }
   }
 
-  flush(): Promise<void> {
-    return this.queue;
+  invalidateWatchCache(): void {
+    this.watchGeneration += 1;
+    this.watchSynced = false;
+  }
+
+  async flush(): Promise<void> {
+    while (true) {
+      const pending = this.queue;
+      await pending;
+      if (pending === this.queue && this.queuedActionableTrades.length === 0) return;
+    }
   }
 
   private enqueue(work: () => Promise<void>): Promise<void> {
@@ -160,9 +198,19 @@ export class PaperExecutor {
     }
     this.monitorTimer = this.clock.setTimeout(() => {
       this.monitorTimer = null;
+      if (!this.running || generation !== this.monitorGeneration) return;
+      if (this.monitorInFlight) {
+        this.scheduleMonitor(generation);
+        return;
+      }
+      this.monitorInFlight = true;
       this.enqueue(async () => {
-        if (!this.running || generation !== this.monitorGeneration) return;
-        await this.runMonitorTickInternal(this.clock.now());
+        try {
+          if (!this.running || generation !== this.monitorGeneration) return;
+          await this.runMonitorTickInternal(this.clock.now());
+        } finally {
+          this.monitorInFlight = false;
+        }
       }).finally(() => {
         if (this.running && generation === this.monitorGeneration) {
           this.scheduleMonitor(generation);
@@ -177,18 +225,181 @@ export class PaperExecutor {
 
   private recordSeenAggId(symbol: string, aggId: number): void {
     let set = this.seenAggIdSets.get(symbol);
-    let list = this.seenAggIds.get(symbol);
-    if (!set || !list) {
+    if (!set) {
       set = new Set();
-      list = [];
       this.seenAggIdSets.set(symbol, set);
-      this.seenAggIds.set(symbol, list);
     }
     set.add(aggId);
-    list.push(aggId);
-    while (list.length > MAX_SEEN_AGG_IDS_PER_SYMBOL) {
-      const oldest = list.shift()!;
+    while (set.size > MAX_SEEN_AGG_IDS_PER_SYMBOL) {
+      const oldest = set.values().next().value;
+      if (oldest === undefined) break;
       set.delete(oldest);
+    }
+  }
+
+  private shouldHandleLiveTrade(symbol: string, trade: TradeBusTradeEvent): boolean {
+    if (!this.watchSynced) return true;
+
+    const pending = this.pendingWatchBySymbol.get(symbol);
+    if (pending) {
+      for (const ord of pending) {
+        if (trade.receivedAt >= ord.eligibleAt && trade.tradeTime >= ord.eligibleAt) {
+          return true;
+        }
+        if (ord.action === 'ENTRY' && trade.receivedAt >= ord.timeoutAt) {
+          return true;
+        }
+      }
+    }
+
+    const stops = this.openStopsBySymbol.get(symbol);
+    if (stops) {
+      for (const st of stops) {
+        if (checkStop({ status: 'OPEN', side: st.side, stopPrice: st.stopPrice }, trade.price)) {
+          return true;
+        }
+      }
+    }
+
+    return false;
+  }
+
+  private handleIncomingLiveTrade(rawTrade: TradeBusTradeEvent): void {
+    if (this.overloadPending) return;
+    const symbol = rawTrade.symbol.toUpperCase();
+    if (!Number.isFinite(rawTrade.price) || rawTrade.price <= 0) return;
+    if (this.hasSeenAggId(symbol, rawTrade.aggId)) return;
+
+    this.lastPrices[symbol] = rawTrade.price;
+    const expIds = this.getOwnedExperimentIds();
+    if (expIds.length === 0) {
+      this.recordSeenAggId(symbol, rawTrade.aggId);
+      return;
+    }
+
+    // Keep open-position activity fresh in memory without hitting DuckDB on every tick
+    const stops = this.openStopsBySymbol.get(symbol);
+    if (stops) {
+      for (const st of stops) {
+        const key = `${st.expId}:${st.account}:${symbol}`;
+        const prevTs = this.lastPosTradeAt.get(key) ?? 0;
+        if (rawTrade.receivedAt > prevTs) {
+          this.lastPosTradeAt.set(key, rawTrade.receivedAt);
+        }
+      }
+    }
+
+    if (!this.shouldHandleLiveTrade(symbol, rawTrade)) {
+      this.recordSeenAggId(symbol, rawTrade.aggId);
+      return;
+    }
+
+    const normalized: TradeBusTradeEvent = { ...rawTrade, symbol };
+    if (this.queuedActionableTrades.length >= MAX_ACTIONABLE_QUEUE) {
+      this.overloadPending = true;
+      this.queuedActionableTrades.length = 0;
+      const generation = this.monitorGeneration;
+      this.enqueue(() => generation === this.monitorGeneration
+        ? this.failClosedOnOverload()
+        : Promise.resolve());
+      return;
+    }
+    this.queuedActionableTrades.push(normalized);
+
+    if (!this.actionableDrainScheduled) {
+      this.actionableDrainScheduled = true;
+      this.enqueue(() => this.drainActionableTrades());
+    }
+  }
+
+  private async drainActionableTrades(): Promise<void> {
+    try {
+      for (let i = 0; this.running && !this.overloadPending && i < ACTIONABLE_DRAIN_BATCH; i++) {
+        const trade = this.queuedActionableTrades.shift();
+        if (!trade) break;
+        await this.handleTrade(trade);
+      }
+    } finally {
+      this.actionableDrainScheduled = false;
+      if (this.running && !this.overloadPending && this.queuedActionableTrades.length > 0) {
+        this.actionableDrainScheduled = true;
+        this.enqueue(() => this.drainActionableTrades());
+      }
+    }
+  }
+
+  private async failClosedOnOverload(): Promise<void> {
+    const now = this.clock.now();
+    const expIds = this.getOwnedExperimentIds();
+    for (const expId of expIds) {
+      let changed = false;
+      await this.store.withTx(async (tx) => {
+        const exp = await this.store.getExperiment(expId, tx);
+        if (!exp || !['RUNNING', 'PAUSED', 'STOPPING'].includes(exp.status)) return;
+        changed = true;
+        await this.store.updateExperimentStatus(expId, 'AWAITING_RESUME', {
+          statusReason: '成交處理佇列超限，可能遺漏停損或成交；請檢查持倉後手動恢復',
+          heartbeatAt: now,
+        }, tx);
+        await this.store.cancelPendingEntries(expId, null, 'EXECUTOR_OVERLOAD', tx);
+        const accounts = await this.store.getAccounts(expId, tx);
+        for (const account of ['A', 'B'] as const) {
+          await this.store.upsertAccount({ ...accounts[account], degraded: true, updatedAt: now }, tx);
+        }
+        await this.store.insertGap({
+          id: `gap-${expId}-overload-${now}-${randomUUID().slice(0, 6)}`,
+          experimentId: expId,
+          account: 'BOTH',
+          kind: 'EXECUTOR_OVERLOAD',
+          startedAt: now,
+          endedAt: null,
+          detail: '可執行成交佇列超過上限，待檢查後恢復',
+        }, tx);
+      });
+      if (changed) this.onAwaitingResume?.(expId);
+    }
+    this.invalidateWatchCache();
+    this.overloadPending = false;
+  }
+
+  private async rebuildWatchCache(tx: any, expIds: string[], gen: number): Promise<void> {
+    const nextPending = new Map<string, WatchSymbolOrder[]>();
+    const nextStops = new Map<string, WatchSymbolStop[]>();
+
+    for (const expId of expIds) {
+      const exp = await this.store.getExperiment(expId, tx);
+      if (!exp || !['RUNNING', 'PAUSED', 'AWAITING_RESUME', 'STOPPING'].includes(exp.status)) {
+        continue;
+      }
+
+      const pending = await this.store.listPendingOrders(exp.id, undefined, tx);
+      for (const ord of pending) {
+        const arr = nextPending.get(ord.symbol) ?? [];
+        arr.push({
+          eligibleAt: ord.createdAt + exp.config.fillDelayMs,
+          timeoutAt: ord.action === 'ENTRY' ? ord.createdAt + exp.config.entryTimeoutMs : Number.POSITIVE_INFINITY,
+          action: ord.action,
+        });
+        nextPending.set(ord.symbol, arr);
+      }
+
+      const openPos = await this.store.listPositions(exp.id, undefined, 'OPEN', tx);
+      for (const pos of openPos) {
+        const arr = nextStops.get(pos.symbol) ?? [];
+        arr.push({
+          expId: exp.id,
+          account: pos.account,
+          side: pos.side,
+          stopPrice: pos.stopPrice,
+        });
+        nextStops.set(pos.symbol, arr);
+      }
+    }
+
+    if (gen === this.watchGeneration) {
+      this.pendingWatchBySymbol = nextPending;
+      this.openStopsBySymbol = nextStops;
+      this.watchSynced = true;
     }
   }
 
@@ -217,6 +428,8 @@ export class PaperExecutor {
     const allPrices = this.getLastPrices();
 
     const expIds = this.getOwnedExperimentIds();
+    const syncGen = this.watchGeneration;
+    let mutatedAny = false;
     for (const expId of expIds) {
       const postFillHooks: Array<{
         account: AccountId;
@@ -231,11 +444,12 @@ export class PaperExecutor {
         if (!exp || !['RUNNING', 'PAUSED', 'AWAITING_RESUME', 'STOPPING'].includes(exp.status)) {
           return;
         }
+        mutatedAny = true;
 
         const accounts = await this.store.getAccounts(exp.id, tx);
         const allPositions = await this.store.listPositions(exp.id, undefined, 'OPEN', tx);
         const allPendingOrders = await this.store.listPendingOrders(exp.id, undefined, tx);
-        const decisions = await this.store.listDecisions(exp.id, tx);
+        const decisions = await this.store.listDecisionMeta(exp.id, tx);
         const latestDecision = decisions.find(d => d.status === 'SUBMITTED') ?? decisions[0] ?? null;
 
         for (const accId of ['A', 'B'] as const) {
@@ -440,6 +654,10 @@ export class PaperExecutor {
         }
       }
     }
+
+    if (mutatedAny && expIds.length > 0) {
+      await this.store.withTx((tx) => this.rebuildWatchCache(tx, expIds, syncGen));
+    }
   }
 
   private async runMonitorTickInternal(now: number): Promise<void> {
@@ -586,6 +804,15 @@ export class PaperExecutor {
       if (triggeredAwaitingResume && this.onAwaitingResume) {
         this.onAwaitingResume(expId);
       }
+    }
+
+    if (expIds.length === 0) {
+      this.pendingWatchBySymbol.clear();
+      this.openStopsBySymbol.clear();
+      this.watchSynced = true;
+    } else {
+      const syncGen = this.watchGeneration;
+      await this.store.withTx((tx) => this.rebuildWatchCache(tx, expIds, syncGen));
     }
   }
 }

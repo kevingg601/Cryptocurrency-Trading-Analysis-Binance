@@ -142,6 +142,17 @@ export interface ResearchModelSummary {
   };
 }
 
+export interface RollingLgbmTrainAudit {
+  startedAt: number;
+  finishedAt: number;
+  elapsedMs: number;
+  cpuPercent?: number | null;
+  rssMb?: number | null;
+  peakRssMb?: number | null;
+  retrained: boolean;
+  dedupedSameCutoff?: boolean;
+}
+
 export interface RollingLgbmStatus {
   ready: boolean;
   versionId?: string | null;
@@ -154,11 +165,18 @@ export interface RollingLgbmStatus {
   elapsedMs?: number | null;
   trainRows?: number | null;
   valRows?: number | null;
+  lastRankingSnapshotId?: string | null;
+  lastRankingPublishedAt?: number | null;
+  lastRankingCutoffTime?: number | null;
+  lastRankingExpiresAt?: number | null;
+  lastRankingError?: string | null;
+  trainAudit?: RollingLgbmTrainAudit | null;
 }
 
 export interface RollingChronosStatus {
   ready: boolean;
   installed?: boolean;
+  paused?: boolean;
   reason?: string | null;
   versionId?: string | null;
   trainedAt?: number | null;
@@ -186,6 +204,18 @@ export interface RollingPipelineStatus {
   universeSymbols: string[];
   lgbm: RollingLgbmStatus;
   chronos2: RollingChronosStatus;
+  trainingPaused?: boolean;
+  pausedModels?: string[];
+  pausedReason?: string | null;
+  lgbmAutoSchedule?: {
+    enabled: boolean;
+    nextRunAt: number | null;
+    lastAttemptAt?: number | null;
+    lastSuccessAt?: number | null;
+    lastError?: string | null;
+    lastCutoffTime?: number | null;
+    lastRankingPublishedAt?: number | null;
+  };
   autoSchedule?: {
     enabled: boolean;
     nextRunAt: number | null;
@@ -193,6 +223,7 @@ export interface RollingPipelineStatus {
     lastSuccessAt?: number | null;
     lastError?: string | null;
     isTrainingChronos?: boolean;
+    chronosPaused?: boolean;
   };
 }
 

@@ -431,6 +431,14 @@ export class ModelResearchRunner {
 
     this.activeJob = job;
     this.jobs.set(jobId, job);
+    if (this.jobs.size > 25) {
+      for (const [oldId, oldJob] of this.jobs.entries()) {
+        if (oldId !== jobId && oldJob.status !== 'RUNNING') {
+          this.jobs.delete(oldId);
+          if (this.jobs.size <= 25) break;
+        }
+      }
+    }
 
     void this.executeJob(job, options).finally(() => {
       if (this.activeJob?.jobId === job.jobId) {

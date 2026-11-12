@@ -12,11 +12,39 @@ import { CoinMetricsSource } from './sources/coinMetrics.ts';
 import { fetchHistoricalKlines } from '../binance/rest.ts';
 import type { AIDataSourceHealth } from './sources/rssNews.ts';
 
+export type HistoricalKlinesFetcher = typeof fetchHistoricalKlines;
+
 export interface DataAggregatorOptions {
   client: DuckDBClient;
   derivativesSource?: BinanceDerivativesSource;
   newsSource?: RSSNewsSource;
   coinMetricsSource?: CoinMetricsSource;
+  fetchKlines?: HistoricalKlinesFetcher;
+}
+
+/**
+ * Extract the trailing contiguous sequence of finalized 1m candles up to `cutoffMs`
+ * so an older collector restart gap does not invalidate fresh candles.
+ */
+function extractTrailingContiguousKlines(raw: KlineData[], cutoffMs: number): KlineData[] {
+  const deduped = new Map<number, KlineData>();
+  for (const k of raw) {
+    if (!k || !Number.isInteger(k.time) || k.time < 0 || k.time * 1000 + 60_000 > cutoffMs) continue;
+    if (![k.open, k.high, k.low, k.close, k.volume].every(Number.isFinite) || k.open <= 0 || k.low <= 0 || k.volume < 0) continue;
+    deduped.set(k.time, k);
+  }
+  const sorted = [...deduped.values()].sort((a, b) => a.time - b.time);
+  if (!sorted.length) return [];
+  let startIdx = sorted.length - 1;
+  while (startIdx > 0 && sorted[startIdx].time - sorted[startIdx - 1].time === 60) {
+    startIdx -= 1;
+  }
+  return sorted.slice(startIdx);
+}
+
+function hasSufficientLatestWindow(klines: KlineData[], cutoffMs: number): boolean {
+  const latestClosedOpen = Math.floor(cutoffMs / 60_000) * 60 - 60;
+  return klines.length >= 20 && klines.at(-1)?.time === latestClosedOpen;
 }
 
 export class AIDataAggregator {
@@ -24,22 +52,43 @@ export class AIDataAggregator {
   readonly derivatives: BinanceDerivativesSource;
   readonly news: RSSNewsSource;
   readonly coinMetrics: CoinMetricsSource;
+  private readonly fetchKlines: HistoricalKlinesFetcher;
 
   constructor(options: DataAggregatorOptions) {
     this.client = options.client;
     this.derivatives = options.derivativesSource ?? new BinanceDerivativesSource();
     this.news = options.newsSource ?? new RSSNewsSource();
     this.coinMetrics = options.coinMetricsSource ?? new CoinMetricsSource();
+    this.fetchKlines = options.fetchKlines ?? fetchHistoricalKlines;
   }
 
   async buildSnapshot(symbol: string, market: MarketType = 'futures', now = Date.now()): Promise<AIDataSnapshot> {
-    // 1. Fetch klines from DuckDB or fallback to Binance REST (consistent 1m timeframe)
-    let klines = await this.getKlines(symbol, market, now);
-    if (!klines.length || klines.length < 20) {
+    // 1. Fetch slow optional context (derivatives, news, on-chain) BEFORE fixing cutoff & 1m candles
+    // so minute boundaries crossed during HTTP calls never render freshly fetched 1m candles stale.
+    const derivativesPromise = market === 'futures'
+      ? Promise.all([
+          this.derivatives.fetchOpenInterest(symbol),
+          this.derivatives.fetchFundingRate(symbol),
+          this.derivatives.fetchRecentLiquidationOrders(symbol),
+        ])
+      : Promise.resolve([null, null, []] as [number | null, number | null, Array<{ price: number; quantity: number; side: 'buy' | 'sell'; timestamp: number }>]);
+    const [[openInterest, fundingRate, liquidations], newsItems, onChain] = await Promise.all([
+      derivativesPromise,
+      this.news.getLatestNews(),
+      this.coinMetrics.getAssetMetrics(symbol),
+    ]);
+
+    const cutoffTime = Math.max(now, Date.now());
+
+    // 2. Fetch finalized 1m klines from DuckDB and fill from Binance REST whenever the
+    // trailing contiguous window is incomplete, stale, or interrupted by an old restart gap.
+    const dbKlines = await this.getKlines(symbol, market, cutoffTime);
+    let klines = extractTrailingContiguousKlines(dbKlines, cutoffTime);
+    if (!hasSufficientLatestWindow(klines, cutoffTime)) {
       try {
-        const raw = await fetchHistoricalKlines(market, symbol, '1m', undefined, undefined, 100);
+        const raw = await this.fetchKlines(market, symbol, '1m', undefined, cutoffTime, 100);
         if (Array.isArray(raw)) {
-          klines = raw.map((item: any[]) => ({
+          const restKlines: KlineData[] = raw.map((item: any[]) => ({
             time: Math.floor(Number(item[0]) / 1000),
             open: parseFloat(item[1]),
             high: parseFloat(item[2]),
@@ -47,18 +96,17 @@ export class AIDataAggregator {
             close: parseFloat(item[4]),
             volume: parseFloat(item[5]),
           }));
+          const merged = extractTrailingContiguousKlines([...dbKlines, ...restKlines], cutoffTime);
+          if (merged.length > klines.length || hasSufficientLatestWindow(merged, cutoffTime)) {
+            klines = merged;
+          }
         }
       } catch {
-        // proceed with whatever is available
+        // proceed with whatever finalized contiguous bars are available
       }
     }
 
-    // Only finalized one-minute candles available at the cutoff are eligible.
-    klines = klines.filter(k => k.time * 1000 + 60_000 <= now);
-    // Sort ascending by time
-    klines.sort((a, b) => a.time - b.time);
-
-    // 2. Derive market summary from klines or latest price
+    // 3. Derive market summary from klines or latest price
     const lastKline = klines.at(-1);
     const firstKline = klines.at(0);
     const lastPrice = lastKline?.close ?? 0;
@@ -72,7 +120,7 @@ export class AIDataAggregator {
     const low = lows.length ? Math.min(...lows) : lastPrice;
     const volume = klines.reduce((sum, k) => sum + k.volume, 0);
 
-    // 3. Technical indicators using bundle & EMA20 series
+    // 4. Technical indicators using bundle & EMA20 series
     const bundle = indicatorBundle(klines);
     const sma20 = bundle.indicators.sma20 ?? undefined;
     const emaSeries = calculateEMASeries(klines, 20);
@@ -81,42 +129,24 @@ export class AIDataAggregator {
     const macd = bundle.indicators.macd ?? undefined;
     const bollinger = bundle.indicators.bb ?? undefined;
 
-    // 4. Derivatives
-    let openInterest: number | null = null;
-    let fundingRate: number | null = null;
-    let liquidations: Array<{ price: number; quantity: number; side: 'buy' | 'sell'; timestamp: number }> = [];
-
-    if (market === 'futures') {
-      [openInterest, fundingRate, liquidations] = await Promise.all([
-        this.derivatives.fetchOpenInterest(symbol),
-        this.derivatives.fetchFundingRate(symbol),
-        this.derivatives.fetchRecentLiquidationOrders(symbol),
-      ]);
-    }
-
-    // 5. News (RSS)
-    const newsItems = await this.news.getLatestNews();
-
-    // 6. On-chain metrics
-    const onChain = await this.coinMetrics.getAssetMetrics(symbol);
-
     const klineAsOf = lastKline ? lastKline.time * 1000 + 60_000 : undefined;
+    const klineWindowValid = hasSufficientLatestWindow(klines, cutoffTime);
     const sourceHealth: Record<string, AIDataSourceHealth> = {
-      market: klineAsOf && now - klineAsOf <= 120_000
+      market: klineAsOf && cutoffTime - klineAsOf <= 120_000
         ? { status: 'healthy', lastSuccessAt: klineAsOf, dataAsOf: klineAsOf }
         : { status: klines.length ? 'stale' : 'missing', dataAsOf: klineAsOf },
-      klines: klines.length >= 20 && klineAsOf && now - klineAsOf <= 120_000
+      klines: klineWindowValid && klineAsOf && cutoffTime - klineAsOf <= 120_000
         ? { status: 'healthy', lastSuccessAt: klineAsOf, dataAsOf: klineAsOf }
         : { status: klines.length ? 'stale' : 'missing', dataAsOf: klineAsOf },
       indicators: Number.isFinite(sma20) || Number.isFinite(ema20)
         ? { status: 'healthy', lastSuccessAt: klineAsOf, dataAsOf: klineAsOf }
         : { status: 'missing', dataAsOf: klineAsOf },
-      derivatives: market === 'futures' ? this.derivatives.getHealth(now) : { status: 'missing' },
-      liquidations: market === 'futures' ? this.derivatives.getHealth(now) : { status: 'missing' },
+      derivatives: market === 'futures' ? this.derivatives.getHealth(cutoffTime) : { status: 'missing' },
+      liquidations: market === 'futures' ? this.derivatives.getHealth(cutoffTime) : { status: 'missing' },
       openInterest: market === 'futures' ? this.derivatives.getMetricHealth('openInterest') : { status: 'missing' },
       fundingRate: market === 'futures' ? this.derivatives.getMetricHealth('fundingRate') : { status: 'missing' },
-      news: this.news.getHealth(now),
-      onChain: this.coinMetrics.getHealth(symbol, now),
+      news: this.news.getHealth(cutoffTime),
+      onChain: this.coinMetrics.getHealth(symbol, cutoffTime),
     };
     const validOnChain = onChain && sourceHealth.onChain.status === 'healthy'
       && Boolean(onChain.date && /^\d{4}-\d{2}-\d{2}$/.test(onChain.date))
@@ -124,8 +154,7 @@ export class AIDataAggregator {
       ? onChain
       : null;
 
-    // 7. Create fixed snapshot
-    const cutoffTime = Math.max(now, Date.now());
+    // 5. Create fixed snapshot
     const snapshot = createAIDataSnapshot({
       symbol,
       marketType: market,

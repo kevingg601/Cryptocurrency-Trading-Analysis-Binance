@@ -1158,6 +1158,7 @@ test('Local rolling pipeline: creates experiment without adapterRunDir, deduplic
     chronosPython: process.execPath,
     clock: fakeClock,
     autoHourlyEnabled: false,
+    chronosTrainingPaused: false,
     runOnStart: false,
     retrainIntervalHours: 6,
   });
@@ -1236,6 +1237,16 @@ test('Local rolling pipeline: creates experiment without adapterRunDir, deduplic
     assert.equal(cycleA.modelVersions.lgbmVersionId, 'lgbm-v2');
     assert.equal(cycleA.modelVersions.chronosVersionId, 'chronos2-v1');
     assert.equal(cycleB.committedRunId, cycleA.committedRunId);
+    const cached = await pipeline.runHourlyCycle({ targetHourH, now: nowMs, commitResearch: true });
+    assert.equal(cached.snapshotDir, cycleA.snapshotDir);
+    assert.equal(rankCalls, 1);
+    const isolatedDir = path.join(tmpDir, 'isolated-snapshot');
+    const isolated = await pipeline.runHourlyCycle({
+      targetHourH, now: nowMs, snapshotDir: isolatedDir,
+      universeSymbols: TEST_UNIVERSE.slice(0, 10), commitResearch: true,
+    });
+    assert.equal(isolated.snapshotDir, isolatedDir);
+    assert.equal(rankCalls, 2);
 
     // 4. Trigger manual Chronos GPU retrain -> 202, concurrent request -> 409, then promotes chronos2-v2
     holdTrain = true;

@@ -18,6 +18,9 @@ import {
   stringifyWithInfinity,
   restoreInfinityInOrders,
   ABComparisonCoordinator,
+  FourGroupComparisonCoordinator,
+  isRemoteOllamaUrl,
+  sanitizeOllamaUrl,
 } from '@fadachi/core';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -25,13 +28,16 @@ import { tradeSource } from '../storage/parquetFlush.ts';
 import { installValidation } from './validation.ts';
 import { AIDataAggregator } from '../ai/aiDataAggregator.ts';
 import { AICLIRunner } from '../ai/cliRunner.ts';
+import { OllamaAnalysisRunner } from '../ai/ollamaRunner.ts';
 import { abStorageTransaction } from '../ai/abStorage.ts';
 import { AB_SERVICE_GENERATION, activateABOwnershipGeneration, claimABLease, ensureABOwnership, getABLease, ownsABLease, renewABLease } from '../ai/abOwnership.ts';
+import { ensureFourGroupSchema, FourGroupStorageError } from '../ai/fourGroupStorage.ts';
+import { FourGroupService } from '../ai/fourGroupService.ts';
 import { AIScopeStore } from '../ai/scopeStore.ts';
 import { ModelResearchRunner, ModelResearchBusyError } from '../research/modelResearchRunner.ts';
 import { TradeBus } from '../modelPaper/tradeBus.ts';
 import { ModelPaperHttpError, ModelPaperService } from '../modelPaper/service.ts';
-import type { RollingModelPipeline } from '../modelPaper/rollingPipeline.ts';
+import { ChronosTrainingPausedError, type RollingModelPipeline } from '../modelPaper/rollingPipeline.ts';
 
 export interface ServerOptions {
   client: DuckDBClient;
@@ -47,9 +53,11 @@ export interface ServerOptions {
   token?: string;
   aiAggregator?: AIDataAggregator;
   cliRunner?: AICLIRunner;
+  ollamaRunner?: OllamaAnalysisRunner;
   researchRunner?: ModelResearchRunner;
   tradeBus?: TradeBus;
   modelPaperService?: ModelPaperService;
+  fourGroupService?: FourGroupService;
   rollingPipeline?: RollingModelPipeline;
 }
 
@@ -93,6 +101,8 @@ export function createServer(options: ServerOptions) {
 
   const aiAggregator = options.aiAggregator ?? new AIDataAggregator({ client });
   const cliRunner = options.cliRunner ?? new AICLIRunner({ client });
+  const ownsOllamaRunner = !options.ollamaRunner;
+  const ollamaRunner = options.ollamaRunner ?? new OllamaAnalysisRunner({ client });
   const researchRunner = options.researchRunner ?? new ModelResearchRunner({ dataDir });
   const tradeBus = options.tradeBus ?? new TradeBus();
   const ownsModelPaperService = !options.modelPaperService;
@@ -105,9 +115,21 @@ export function createServer(options: ServerOptions) {
     rollingPipeline: options.rollingPipeline,
   });
   const rollingPipeline = options.rollingPipeline ?? researchRunner.getRollingPipeline() ?? modelPaperService.rollingPipeline;
+  const ownsFourGroupService = !options.fourGroupService;
+  const fourGroupService = options.fourGroupService ?? new FourGroupService({
+    client,
+    tradeBus,
+    rollingPipeline,
+    aiAggregator,
+    ollamaRunner,
+  });
+  const fourGroupRepo = fourGroupService.repo;
   const aiScopeStore = new AIScopeStore(client);
   const saveAtomically = abStorageTransaction(client);
-  const ownershipReady = saveAtomically(connection => activateABOwnershipGeneration(connection, AB_SERVICE_GENERATION));
+  const ownershipReady = saveAtomically(async (connection) => {
+    await activateABOwnershipGeneration(connection, AB_SERVICE_GENERATION);
+    await ensureFourGroupSchema(connection);
+  });
 
   const app = fastify({ logger: false });
   app.addHook('onReady', async () => { await ownershipReady; });
@@ -123,6 +145,12 @@ export function createServer(options: ServerOptions) {
   app.register(cors, { origin: (origin, callback) => callback(null, trustedOrigin(origin)) });
   installValidation(app);
   app.addHook('preClose', async () => {
+    if (ownsFourGroupService) {
+      await fourGroupService.stop();
+    }
+    if (ownsOllamaRunner) {
+      ollamaRunner.close();
+    }
     if (ownsModelPaperService) {
       await modelPaperService.stop();
     }
@@ -917,21 +945,261 @@ export function createServer(options: ServerOptions) {
   });
 
   routes.post('/api/research/pipeline/retrain-chronos', async (req, reply) => {
+    if (rollingPipeline.isTrainingPaused()) {
+      return reply.status(409).send({
+        error: '目前暫停 Chronos-2 及其他非 LightGBM 模型訓練，僅執行 LightGBM 每小時獨立更新',
+        paused: true,
+      });
+    }
     const body = (req.body as { retrainIntervalHours?: number } | undefined) || {};
     if (rollingPipeline.isBusyTrainingChronos() || researchRunner.isBusy()) {
       return reply.status(409).send({ error: '模型推論或 GPU 重訓工作目前忙碌中，請稍候' });
     }
-    const jobPromise = rollingPipeline.triggerChronosRetrain({
-      reason: 'manual',
-      force: true,
-      retrainIntervalHours: body.retrainIntervalHours,
+    try {
+      const jobPromise = rollingPipeline.triggerChronosRetrain({
+        reason: 'manual',
+        force: true,
+        retrainIntervalHours: body.retrainIntervalHours,
+      });
+      void jobPromise.catch(() => {});
+      return reply.status(202).send({
+        started: true,
+        isTraining: true,
+        message: '已於背景啟動本機 GPU Chronos-2 LoRA 重訓，訓練期間原有推論版本維持有效',
+      });
+    } catch (err) {
+      if (err instanceof ChronosTrainingPausedError) {
+        return reply.status(409).send({ error: err.message, paused: true });
+      }
+      throw err;
+    }
+  });
+
+  // Independent LightGBM Hourly Ranking Snapshot Routes
+  routes.get('/api/research/lgbm/latest', async () => {
+    const pipelineStatus = rollingPipeline.getStatus();
+    const rankingState = rollingPipeline.getLatestLightgbmRanking();
+    return {
+      ...rankingState,
+      universeSymbols: pipelineStatus.universeSymbols,
+      lgbmStatus: pipelineStatus.lgbm,
+      lgbmAutoSchedule: pipelineStatus.lgbmAutoSchedule,
+      trainingPaused: pipelineStatus.trainingPaused,
+      pausedReason: pipelineStatus.pausedReason,
+      serverTime: Date.now(),
+    };
+  });
+
+  routes.post('/api/research/lgbm/update', async (req, reply) => {
+    const body = (req.body as { force?: boolean } | undefined) || {};
+    try {
+      const snapshot = await rollingPipeline.runLightgbmHourlyUpdate({
+        force: Boolean(body.force),
+        skipTrainingIfSameCutoff: true,
+      });
+      return { ok: true, snapshot };
+    } catch (err: any) {
+      const status = err?.errorCode === 'DATA_NOT_READY' ? 409 : err instanceof ModelResearchBusyError ? 409 : 500;
+      return reply.status(status).send({
+        error: err instanceof Error ? err.message : 'LightGBM 每小時獨立更新失敗',
+        errorCode: err?.errorCode,
+      });
+    }
+  });
+
+  // Ollama Connection & Analysis Routes (strictly isolated from Antigravity CLI status)
+  routes.get('/api/ollama/status', async (req, reply) => {
+    const queryUrl = (req.query as { url?: string } | undefined)?.url;
+    try {
+      const cleanUrl = queryUrl ? sanitizeOllamaUrl(queryUrl) : undefined;
+      return await ollamaRunner.getStatus(cleanUrl);
+    } catch (err: any) {
+      return reply.status(400).send({ error: err?.message || 'Ollama URL 格式無效' });
+    }
+  });
+
+  routes.post('/api/ollama/test', async (req, reply) => {
+    const body = (req.body as { url?: string; model?: string } | undefined) || {};
+    try {
+      const cleanUrl = sanitizeOllamaUrl(body.url);
+      return await ollamaRunner.testConnection(cleanUrl, body.model);
+    } catch (err: any) {
+      return reply.status(400).send({ error: err?.message || 'Ollama URL 格式無效' });
+    }
+  });
+
+  routes.post('/api/ollama/analyze', async (req, reply) => {
+    const body = req.body as {
+      url?: string;
+      model: string;
+      symbols: string[];
+      market?: 'spot' | 'futures';
+      promptVersion?: string;
+      ruleVersion?: string;
+    };
+    let cleanUrl: string;
+    try {
+      cleanUrl = sanitizeOllamaUrl(body.url);
+    } catch (err: any) {
+      return reply.status(400).send({ error: err?.message || 'Ollama URL 格式無效' });
+    }
+    try {
+      const out = await ollamaRunner.analyzeSymbols({
+        aggregator: aiAggregator,
+        symbols: body.symbols,
+        model: body.model,
+        baseUrl: cleanUrl,
+        market: body.market ?? 'futures',
+        promptVersion: body.promptVersion,
+        ruleVersion: body.ruleVersion,
+      });
+      return {
+        ...out,
+        isRemote: isRemoteOllamaUrl(cleanUrl),
+      };
+    } catch (err: any) {
+      return reply.status(500).send({ error: err?.message || 'Ollama 分析執行失敗' });
+    }
+  });
+
+  // Four-Group Strategy Comparison Routes (Collector-resident engine; strictly separated from legacy /api/ab/*)
+  const handleFourGroupError = (reply: any, err: unknown) => {
+    if (err instanceof FourGroupStorageError) {
+      return reply.status(err.statusCode).send({
+        error: err.message,
+        ...(err.code ? { code: err.code } : {}),
+        ...(err.batchId ? { id: err.batchId } : {}),
+        ...(err.serverTime !== undefined ? { serverTime: err.serverTime } : {}),
+        ...(err.expiresAt !== undefined ? { expiresAt: err.expiresAt } : {}),
+        ...(err.generation ? { generation: err.generation } : {}),
+      });
+    }
+    const msg = err instanceof Error ? err.message : String(err);
+    return reply.status(500).send({ error: `四組策略操作失敗：${msg}` });
+  };
+
+  const sendFourGroupJson = (reply: any, payload: unknown) =>
+    reply.type('application/json; charset=utf-8').send(stringifyWithInfinity(payload));
+
+  const deprecatedFourGroupEndpoint = async (_req: any, reply: any) =>
+    reply.status(410).send({
+      error: '四組策略模擬已搬遷至 Collector 後端執行，瀏覽器寫入租約端點已停用',
+      code: 'ENDPOINT_DEPRECATED',
     });
-    void jobPromise.catch(() => {});
-    return reply.status(202).send({
-      started: true,
-      isTraining: true,
-      message: '已於背景啟動本機 GPU Chronos-2 LoRA 重訓，訓練期間原有推論版本維持有效',
-    });
+
+  routes.get('/api/four-group/status', async (_req, reply) => {
+    try {
+      return sendFourGroupJson(reply, fourGroupService.getStatus());
+    } catch (err) {
+      return handleFourGroupError(reply, err);
+    }
+  });
+
+  routes.post('/api/four-group/batches/start', async (req, reply) => {
+    try {
+      const body = (req.body as any) || {};
+      const status = await fourGroupService.startBatch({
+        config: body.config,
+        selectedCoins: body.selectedCoins,
+        coinMode: body.coinMode,
+        ollamaUrl: body.ollamaUrl,
+        model: body.model,
+        signalSettings: body.signalSettings,
+      });
+      return sendFourGroupJson(reply, status);
+    } catch (err) {
+      return handleFourGroupError(reply, err);
+    }
+  });
+
+  routes.post('/api/four-group/batches/:id/pause', async (req, reply) => {
+    try {
+      const id = (req.params as any).id as string;
+      return sendFourGroupJson(reply, await fourGroupService.pauseBatch(id));
+    } catch (err) {
+      return handleFourGroupError(reply, err);
+    }
+  });
+
+  routes.post('/api/four-group/batches/:id/resume', async (req, reply) => {
+    try {
+      const id = (req.params as any).id as string;
+      return sendFourGroupJson(reply, await fourGroupService.resumeBatch(id));
+    } catch (err) {
+      return handleFourGroupError(reply, err);
+    }
+  });
+
+  routes.post('/api/four-group/batches/:id/drain', async (req, reply) => {
+    try {
+      const id = (req.params as any).id as string;
+      return sendFourGroupJson(reply, await fourGroupService.drainBatch(id));
+    } catch (err) {
+      return handleFourGroupError(reply, err);
+    }
+  });
+
+  routes.post('/api/four-group/batches/:id/close-all', async (req, reply) => {
+    try {
+      const id = (req.params as any).id as string;
+      return sendFourGroupJson(reply, await fourGroupService.closeAllBatch(id));
+    } catch (err) {
+      return handleFourGroupError(reply, err);
+    }
+  });
+
+  routes.post('/api/four-group/batches/:id/ollama-refresh', async (req, reply) => {
+    try {
+      const id = (req.params as any).id as string;
+      return sendFourGroupJson(reply, await fourGroupService.refreshOllama(id));
+    } catch (err) {
+      return handleFourGroupError(reply, err);
+    }
+  });
+
+  routes.get('/api/four-group/batches', async (req, reply) => {
+    try {
+      const query = (req.query as { market?: string; limit?: string } | undefined) || {};
+      const limit = Number(query.limit) || 50;
+      const rows = await fourGroupRepo.list(query.market, limit);
+      return sendFourGroupJson(reply, rows);
+    } catch (err) {
+      return handleFourGroupError(reply, err);
+    }
+  });
+
+  routes.get('/api/four-group/batches/:id', async (req, reply) => {
+    try {
+      const id = (req.params as any).id as string;
+      const row = await fourGroupRepo.getById(id);
+      if (!row) {
+        return reply.status(404).send({ error: '找不到指定的四組策略比較批次' });
+      }
+      return sendFourGroupJson(reply, row);
+    } catch (err) {
+      return handleFourGroupError(reply, err);
+    }
+  });
+
+  routes.post('/api/four-group/batches/reconcile', deprecatedFourGroupEndpoint);
+  routes.post('/api/four-group/batches/:id/claim', deprecatedFourGroupEndpoint);
+  routes.post('/api/four-group/batches/:id/lease', deprecatedFourGroupEndpoint);
+  routes.put('/api/four-group/batches', deprecatedFourGroupEndpoint);
+
+  routes.get('/api/four-group/batches/:id/export.csv', async (req, reply) => {
+    try {
+      const id = (req.params as any).id as string;
+      const row = await fourGroupRepo.getById(id);
+      if (!row) {
+        return reply.status(404).send({ error: '找不到指定的四組策略比較批次' });
+      }
+      const csv = FourGroupComparisonCoordinator.exportCsvFromBatch(row.batch);
+      reply.header('Content-Type', 'text/csv; charset=utf-8');
+      reply.header('Content-Disposition', `attachment; filename="four-group-${id.replace(/[^a-zA-Z0-9_-]/g, '_')}.csv"`);
+      return csv;
+    } catch (err) {
+      return handleFourGroupError(reply, err);
+    }
   });
 
   routes.get('/api/research/latest', async () => {

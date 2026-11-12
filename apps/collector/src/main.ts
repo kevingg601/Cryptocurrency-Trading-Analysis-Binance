@@ -17,6 +17,8 @@ import { AIDataAggregator } from './ai/aiDataAggregator.ts';
 import { AICLIRunner } from './ai/cliRunner.ts';
 import { AIScheduler } from './ai/aiScheduler.ts';
 import { AIScopeStore } from './ai/scopeStore.ts';
+import { OllamaAnalysisRunner } from './ai/ollamaRunner.ts';
+import { FourGroupService } from './ai/fourGroupService.ts';
 import { ModelResearchRunner } from './research/modelResearchRunner.ts';
 import { TradeBus } from './modelPaper/tradeBus.ts';
 import { RollingModelPipeline } from './modelPaper/rollingPipeline.ts';
@@ -72,6 +74,11 @@ async function bootstrap() {
   const streamManagers: BinanceStreamManager[] = [];
 
   const controller = new AbortController();
+  writer.setOverflowHandler((kind, depth) => {
+    console.error(`[Collector] ${kind} storage queue overflow at ${depth}; shutting down to preserve a detectable data gap`);
+    controller.abort();
+    void shutdown('storage_overflow', 1);
+  });
   const ipc = collectorIPC();
   const background = new Set<Promise<unknown>>();
   const track = (job: Promise<unknown>) => {
@@ -94,11 +101,15 @@ async function bootstrap() {
     dataDir: researchRunner.dataDir,
     workspaceRoot: researchRunner.workspaceRoot,
     autoHourlyEnabled: true,
+    autoLgbmHourlyEnabled: true,
+    chronosTrainingPaused: true,
     runOnStart: true,
     retrainIntervalHours: 6,
   });
   researchRunner.attachRollingPipeline(rollingPipeline);
+  let ollamaRunner: OllamaAnalysisRunner | undefined;
   let modelPaperService: ModelPaperService | undefined;
+  let fourGroupService: FourGroupService | undefined;
   const start = async () => {
     await initDatabase(duckClient, path.resolve(import.meta.dirname, 'storage', 'schema.sql'));
     controller.signal.throwIfAborted();
@@ -112,6 +123,7 @@ async function bootstrap() {
   await aiScopeStore.initialize();
   const cliRunner = new AICLIRunner({ client: duckClient });
   await cliRunner.verifyIsolation();
+  ollamaRunner = new OllamaAnalysisRunner({ client: duckClient });
   aiScheduler = new AIScheduler({
     aggregator: aiAggregator,
     cliRunner,
@@ -146,8 +158,9 @@ async function bootstrap() {
       symbols.forEach(s => streamNameSet.add(`${s.toLowerCase()}@ticker`));
     }
 
+    const pipelineUniverse = rollingPipeline.getStatus().universeSymbols;
     const aggTradeSymbols = market === 'futures'
-      ? Array.from(new Set([...symbols, ...researchUniverse.symbols]))
+      ? Array.from(new Set([...symbols, ...researchUniverse.symbols, ...pipelineUniverse]))
       : symbols;
     aggTradeSymbols.forEach(s => {
       streamNameSet.add(`${s.toLowerCase()}@aggTrade`);
@@ -215,7 +228,7 @@ async function bootstrap() {
 
           if (Number.isFinite(price) && Number.isFinite(qty) && price > 0 && qty > 0
               && Number.isSafeInteger(aggId) && aggId >= 0 && Number.isSafeInteger(tradeTime) && tradeTime >= 0) {
-            writer.pushAggTrade({
+            if (!writer.pushAggTrade({
               market,
               symbol,
               agg_id: aggId,
@@ -227,7 +240,7 @@ async function bootstrap() {
               recv_time: receivedAt,
               is_buyer_maker: isBuyerMaker,
               source: 'ws',
-            });
+            })) return;
 
             const tradeObj = {
               symbol,
@@ -257,6 +270,8 @@ async function bootstrap() {
                 aggId,
                 tradeTime,
                 receivedAt,
+                side: tradeObj.side,
+                lastTradeId: tradeObj.lastTradeId,
               });
             }
 
@@ -283,7 +298,7 @@ async function bootstrap() {
           if ([open, high, low, close, volume, Number(k.q)].every(Number.isFinite)
               && close > 0 && open > 0 && high >= low && low > 0 && volume >= 0
               && Number.isSafeInteger(openTime) && openTime >= 0 && typeof symbol === 'string') {
-            writer.pushKline({
+            if (!writer.pushKline({
               market,
               symbol,
               open_time: openTime,
@@ -298,7 +313,7 @@ async function bootstrap() {
               taker_buy_quote: Number(k.Q),
               is_final: isFinal,
               source: 'ws',
-            });
+            })) return;
 
             liveHub.broadcastKline(symbol, {
               time: Math.floor(openTime / 1000),
@@ -340,6 +355,14 @@ async function bootstrap() {
     availabilityReason: researchUniverse.error,
   });
   await modelPaperService.start();
+  fourGroupService = new FourGroupService({
+    client: duckClient,
+    tradeBus,
+    rollingPipeline,
+    aiAggregator,
+    ollamaRunner,
+  });
+  await fourGroupService.start();
   rollingPipeline.start();
   controller.signal.throwIfAborted();
 
@@ -369,9 +392,11 @@ async function bootstrap() {
     token,
     aiAggregator,
     cliRunner,
+    ollamaRunner,
     researchRunner,
     tradeBus,
     modelPaperService,
+    fourGroupService,
     rollingPipeline,
   });
 
@@ -397,9 +422,11 @@ async function bootstrap() {
       const attempt = async (work: () => Promise<unknown>) => {
         try { await work(); } catch (err) { failures.push(err); console.error('[Collector] Shutdown error:', err); }
       };
+      if (fourGroupService) await attempt(() => fourGroupService!.stop());
       if (modelPaperService) await attempt(() => modelPaperService!.stop());
-      await attempt(() => rollingPipeline.stop());
+      ollamaRunner?.close();
       researchRunner.close();
+      await attempt(() => rollingPipeline.stop());
       if (hourlyTimer) clearInterval(hourlyTimer);
       streamManagers.forEach(manager => manager.stop());
       aiAggregator?.derivatives.stop();

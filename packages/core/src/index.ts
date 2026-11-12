@@ -30,6 +30,8 @@ export * from './ai/aiSnapshot.ts';
 export * from './ai/aiOutputValidator.ts';
 export * from './ai/abSerialization.ts';
 export * from './auto/abCoordinator.ts';
+export * from './auto/fourGroupTypes.ts';
+export * from './auto/fourGroupCoordinator.ts';
 export * from './research/researchTypes.ts';
 export * from './modelPaper/index.ts';
 export * from './utils.ts';

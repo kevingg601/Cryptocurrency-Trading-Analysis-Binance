@@ -4,8 +4,15 @@ import {
   type MarketType,
   type TickerData,
   type CoinMetadata,
+  type AutoTradingConfig,
+  type AutoTradingNotification,
   type AutoTradingSnapshot,
   type ABTradingBatch,
+  type ExtendedAIAnalysisInput,
+  type FourGroupCoinMode,
+  type FourGroupComparisonMetrics,
+  type FourGroupTradingBatch,
+  type LightgbmRankSnapshot,
   type AIAnalysisResult,
   type AIDataSnapshot,
   type ReplayResult,
@@ -56,6 +63,85 @@ export function resolveCollectorConfig(): CollectorConfig {
   };
 }
 
+export class CollectorApiError extends Error {
+  readonly status: number;
+  readonly code?: string;
+  readonly batchId?: string;
+  readonly serverTime?: number;
+  readonly expiresAt?: number | null;
+  readonly generation?: string;
+
+  constructor(
+    message: string,
+    details: {
+      status: number;
+      code?: string;
+      batchId?: string;
+      serverTime?: number;
+      expiresAt?: number | null;
+      generation?: string;
+    },
+  ) {
+    super(message);
+    this.name = 'CollectorApiError';
+    this.status = details.status;
+    this.code = details.code;
+    this.batchId = details.batchId;
+    this.serverTime = details.serverTime;
+    this.expiresAt = details.expiresAt;
+    this.generation = details.generation;
+  }
+}
+
+export interface FourGroupBackendNotification extends AutoTradingNotification {
+  seq: number;
+  createdAt: number;
+}
+
+export interface FourGroupLgbmRuntimeState {
+  snapshot: LightgbmRankSnapshot | null;
+  expectedCutoffTime: number | null;
+  isExpired: boolean;
+  matchesCurrentHour: boolean;
+  latestError: { cutoffTime?: number; failedAt?: number; error?: string } | null;
+  universeSymbols: string[];
+  lgbmStatus: RollingPipelineStatus['lgbm'] | null;
+  lgbmAutoSchedule?: RollingPipelineStatus['lgbmAutoSchedule'];
+  trainingPaused: boolean;
+  pausedReason: string | null;
+}
+
+export interface FourGroupEngineRuntime {
+  runningInCollector: boolean;
+  generation: string;
+  lastSaveAt: number | null;
+  lastSaveDurationMs: number | null;
+  lastSaveRevision: number | null;
+  lastQueueWaitMs: number | null;
+  lastTxElapsedMs: number | null;
+  unsyncedChanges: boolean;
+  error: string | null;
+}
+
+export interface FourGroupRuntimeStatus {
+  snapshot: FourGroupTradingBatch;
+  metrics: FourGroupComparisonMetrics;
+  streamHealthy: boolean;
+  rulesReady: boolean;
+  rulesError: string | null;
+  lgbmState: FourGroupLgbmRuntimeState;
+  ollama: {
+    analyzing: boolean;
+    progress: { completed: number; total: number; currentSymbol: string | null } | null;
+    lastError: string | null;
+    analyses: Record<string, ExtendedAIAnalysisInput>;
+    symbolErrors: Record<string, string>;
+  };
+  recentNotifications: FourGroupBackendNotification[];
+  engineRuntime: FourGroupEngineRuntime;
+  serverTime: number;
+}
+
 export class CollectorClient {
   private config: CollectorConfig;
   private paperSaves = new Map<MarketType, Promise<any>>();
@@ -83,11 +169,28 @@ export class CollectorClient {
 
     if (!res.ok) {
       let detail = res.statusText;
+      let code: string | undefined;
+      let batchId: string | undefined;
+      let serverTime: number | undefined;
+      let expiresAt: number | null | undefined;
+      let generation: string | undefined;
       try {
         const payload = await res.clone().json();
         if (typeof payload?.error === 'string') detail = payload.error;
+        if (typeof payload?.code === 'string') code = payload.code;
+        if (typeof payload?.id === 'string') batchId = payload.id;
+        if (typeof payload?.serverTime === 'number') serverTime = payload.serverTime;
+        if (typeof payload?.expiresAt === 'number' || payload?.expiresAt === null) expiresAt = payload.expiresAt;
+        if (typeof payload?.generation === 'string') generation = payload.generation;
       } catch { /* Non-JSON error responses use the HTTP status text. */ }
-      throw new Error(`Collector API Error (${res.status}): ${detail}`);
+      throw new CollectorApiError(`Collector API Error (${res.status}): ${detail}`, {
+        status: res.status,
+        code,
+        batchId,
+        serverTime,
+        expiresAt,
+        generation,
+      });
     }
 
     const text = await res.text();
@@ -287,6 +390,174 @@ export class CollectorClient {
       url.searchParams.set('token', this.config.token);
     }
     return url.toString();
+  }
+
+  async getOllamaStatus(url?: string): Promise<{
+    reachable: boolean;
+    baseUrl: string;
+    isRemote: boolean;
+    models: string[];
+    runningModels: Array<{ name: string; model: string; size?: number; sizeVram?: number }>;
+    latencyMs: number;
+    error?: string;
+    latestAnalyses: Record<string, AIAnalysisResult>;
+  }> {
+    const params = new URLSearchParams();
+    if (url?.trim()) params.set('url', url.trim());
+    const qs = params.toString();
+    return this.request(`/api/ollama/status${qs ? `?${qs}` : ''}`);
+  }
+
+  async testOllamaConnection(url?: string, model?: string): Promise<{
+    reachable: boolean;
+    baseUrl: string;
+    isRemote: boolean;
+    models: string[];
+    runningModels: Array<{ name: string; model: string; size?: number; sizeVram?: number }>;
+    hasRequestedModel?: boolean;
+    latencyMs: number;
+    error?: string;
+  }> {
+    return this.request('/api/ollama/test', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...(url?.trim() ? { url: url.trim() } : {}), ...(model?.trim() ? { model: model.trim() } : {}) }),
+    });
+  }
+
+  async analyzeWithOllama(data: {
+    url?: string;
+    model: string;
+    symbols: string[];
+    market?: MarketType;
+    promptVersion?: string;
+    ruleVersion?: string;
+  }): Promise<{
+    baseUrl: string;
+    isRemote: boolean;
+    model: string;
+    results: Record<string, AIAnalysisResult>;
+    telemetries: Record<string, any>;
+    errors: Record<string, string>;
+  }> {
+    return this.request('/api/ollama/analyze', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    }, 210_000);
+  }
+
+  async getLatestLightgbmRanking(): Promise<{
+    snapshot: LightgbmRankSnapshot | null;
+    expectedCutoffTime: number;
+    isExpired: boolean;
+    matchesCurrentHour: boolean;
+    latestError: { cutoffTime?: number; failedAt?: number; error?: string } | null;
+    universeSymbols: string[];
+    lgbmStatus: RollingPipelineStatus['lgbm'];
+    lgbmAutoSchedule?: RollingPipelineStatus['lgbmAutoSchedule'];
+    trainingPaused?: boolean;
+    pausedReason?: string | null;
+    serverTime: number;
+  }> {
+    return this.request('/api/research/lgbm/latest');
+  }
+
+  async triggerLightgbmHourlyUpdate(force = false): Promise<{ ok: boolean; snapshot: LightgbmRankSnapshot }> {
+    return this.request('/api/research/lgbm/update', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ force }),
+    }, 180_000);
+  }
+
+  async getFourGroupBatches(market: MarketType = 'futures', limit = 50): Promise<Array<{
+    id: string;
+    market: MarketType;
+    status: string;
+    revision: number;
+    model: string;
+    batch: FourGroupTradingBatch;
+    ownerActive?: boolean;
+  }>> {
+    const params = new URLSearchParams({ market, limit: String(limit) });
+    return this.request(`/api/four-group/batches?${params.toString()}`);
+  }
+
+  async getFourGroupBatch(id: string) {
+    return this.request(`/api/four-group/batches/${encodeURIComponent(id)}`);
+  }
+
+  async getFourGroupStatus(): Promise<FourGroupRuntimeStatus> {
+    return this.request('/api/four-group/status');
+  }
+
+  async startFourGroupBatch(payload: {
+    config: AutoTradingConfig;
+    selectedCoins?: string[];
+    coinMode?: FourGroupCoinMode;
+    ollamaUrl?: string;
+    model: string;
+    signalSettings?: Record<string, number>;
+  }): Promise<FourGroupRuntimeStatus> {
+    return this.request('/api/four-group/batches/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async pauseFourGroupBatch(id: string): Promise<FourGroupRuntimeStatus> {
+    return this.request(`/api/four-group/batches/${encodeURIComponent(id)}/pause`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    });
+  }
+
+  async resumeFourGroupBatch(id: string): Promise<FourGroupRuntimeStatus> {
+    return this.request(`/api/four-group/batches/${encodeURIComponent(id)}/resume`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    });
+  }
+
+  async drainFourGroupBatch(id: string): Promise<FourGroupRuntimeStatus> {
+    return this.request(`/api/four-group/batches/${encodeURIComponent(id)}/drain`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    });
+  }
+
+  async closeAllFourGroupBatch(id: string): Promise<FourGroupRuntimeStatus> {
+    return this.request(`/api/four-group/batches/${encodeURIComponent(id)}/close-all`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    });
+  }
+
+  async refreshFourGroupOllama(id: string): Promise<FourGroupRuntimeStatus> {
+    return this.request(`/api/four-group/batches/${encodeURIComponent(id)}/ollama-refresh`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    });
+  }
+
+  async exportFourGroupBatchCsv(id: string): Promise<string> {
+    const headers = new Headers();
+    if (this.config.token) {
+      headers.set('Authorization', `Bearer ${this.config.token}`);
+    }
+    const url = `${this.config.apiBase}/api/four-group/batches/${encodeURIComponent(id)}/export.csv`;
+    const res = await fetch(url, { headers });
+    if (!res.ok) {
+      throw new Error(`Four-group CSV Export failed (${res.status}): ${res.statusText}`);
+    }
+    return res.text();
   }
 
   async migrateBrowser(data: { paper?: Record<string, any>; batches?: any[] }) {

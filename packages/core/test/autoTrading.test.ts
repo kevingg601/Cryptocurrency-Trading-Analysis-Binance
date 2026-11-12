@@ -544,27 +544,22 @@ test('an id-less same-timestamp trade is not new, and duplicate trades cannot re
   assert.equal(h.engine.snapshot().positions[0].lastReceivedAt, epoch + 251);
 });
 
-test('a greater-than-five-second position freshness gap interrupts with the last mark, never a fabricated close', () => {
+test('a quiet held symbol does not interrupt a healthy stream and the next trade can trigger a stop', () => {
   const h = opened();
-  h.send(1_000, 117);
+  h.send(1_000, 105);
   h.engine.tick(epoch + 6_000);
   assert.equal(h.engine.snapshot().status, 'RUNNING');
-  h.send(6_001, 120);
+  h.engine.tick(epoch + 6_001);
+  assert.equal(h.engine.snapshot().status, 'RUNNING');
+  h.send(6_002, 98);
   const state = h.engine.snapshot();
-  assert.equal(state.status, 'INTERRUPTED');
-  assert.equal(state.endedAt, epoch + 6_001);
-  assert.equal(state.positions[0].incomplete, true);
-  assert.equal(state.positions[0].currentPrice, 117);
-  assert.equal(state.orders.length, 0);
+  assert.equal(state.status, 'RUNNING');
+  assert.equal(state.positions[0].currentPrice, 98);
+  assert.equal(state.orders[0].reason, 'SL');
   assert.equal(state.fills.length, 1);
-  assert.equal(state.trades.length, 0);
-  near(state.lastEquity, 10_000 + 11 * h.position.quantity);
-  assert.equal(calculateAutoMetrics(state).incompletePositions, 1);
-  assert.equal(calculateAutoMetrics(state).completedTrades, 0);
-  assert.equal(calculateAutoMetrics(state).winRate, null);
-  h.send(6_250, 120);
-  assert.equal(h.engine.snapshot().fills.length, 1);
-  assert.deepEqual(h.engine.takeNotifications().map(n => n.type), ['auto-entry', 'auto-interrupted']);
+  h.send(6_252, 98);
+  assert.equal(h.engine.snapshot().positions.length, 0);
+  assert.equal(h.engine.snapshot().trades[0].reason, 'SL');
 });
 
 test('plan archives preserve accepted levels after cancellation/closure and are isolated from caller changes', () => {

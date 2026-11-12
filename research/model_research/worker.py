@@ -875,33 +875,87 @@ def handle_forward_rank(req: dict[str, Any]) -> dict[str, Any]:
     return out_doc
 
 
+def _sample_process_memory_mb() -> tuple[float | None, float | None]:
+    """Return (current_rss_mb, peak_rss_mb) using OS APIs without external packages."""
+    try:
+        if sys.platform == "win32":
+            import ctypes
+            from ctypes import wintypes
+
+            class _PROCESS_MEMORY_COUNTERS(ctypes.Structure):
+                _fields_ = [
+                    ("cb", wintypes.DWORD),
+                    ("PageFaultCount", wintypes.DWORD),
+                    ("PeakWorkingSetSize", ctypes.c_size_t),
+                    ("WorkingSetSize", ctypes.c_size_t),
+                    ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                    ("PagefileUsage", ctypes.c_size_t),
+                    ("PeakPagefileUsage", ctypes.c_size_t),
+                ]
+
+            counters = _PROCESS_MEMORY_COUNTERS()
+            counters.cb = ctypes.sizeof(counters)
+            handle = ctypes.windll.kernel32.GetCurrentProcess()
+            if ctypes.windll.psapi.GetProcessMemoryInfo(handle, ctypes.byref(counters), counters.cb):
+                rss = round(counters.WorkingSetSize / (1024 * 1024), 2)
+                peak = round(counters.PeakWorkingSetSize / (1024 * 1024), 2)
+                return rss, peak
+        else:
+            import resource
+
+            usage = resource.getrusage(resource.RUSAGE_SELF)
+            divisor = (1024 * 1024) if sys.platform == "darwin" else 1024
+            peak = round(float(usage.ru_maxrss) / divisor, 2)
+            rss = peak
+            proc_statm = Path("/proc/self/statm")
+            if proc_statm.is_file():
+                parts = proc_statm.read_text(encoding="utf-8").split()
+                if len(parts) >= 2:
+                    rss = round(int(parts[1]) * os.sysconf("SC_PAGE_SIZE") / (1024 * 1024), 2)
+            return rss, peak
+    except Exception:
+        pass
+    return None, None
+
+
 def handle_rolling_prepare_and_train_rank(req: dict[str, Any]) -> dict[str, Any]:
     """
     Unified hourly live step:
     1. Incrementally update 180-day sliding window parquet store (`model-live/datasets/`).
     2. Retrain LightGBM Long & Short rankers on CPU (rolling Train/Val ending <= cutoff) and promote atomically.
-    3. Produce current hour ranking output + report Chronos-2 retrain due state.
+    3. Produce current hour ranking output + atomically publish `model-live/models/lgbm/latest-ranking.json` + report Chronos-2 retrain due state.
     """
     from .features_and_labels import ONE_HOUR_MS
     from .lightgbm_ranker import load_active_rolling_lightgbm, publish_rolling_lgbm_version, rank_at_cutoff
     from .rolling_store import (
         DEFAULT_VAL_DAYS,
         DEFAULT_WINDOW_DAYS,
+        atomic_write_json,
         build_rolling_panel_and_splits,
         resolve_live_paths,
         sync_rolling_dataset,
     )
 
+    started_at_ms = int(time.time() * 1000)
+    wall_t0 = time.perf_counter()
+    cpu_t0 = time.process_time()
+
     data_dir = resolve_data_dir(req)
-    now_ms = int(time.time() * 1000)
+    now_ms = started_at_ms
     target_cutoff = int(req.get("targetCutoffTime") or ((now_ms // ONE_HOUR_MS) * ONE_HOUR_MS))
     if target_cutoff <= 0 or target_cutoff % ONE_HOUR_MS != 0:
         raise ValueError("targetCutoffTime 必須為正數 UTC 整點毫秒時間戳")
+    if target_cutoff > (now_ms // ONE_HOUR_MS) * ONE_HOUR_MS:
+        raise DataNotReadyError("禁止使用尚未收盤的未來 targetCutoffTime")
 
     window_days = int(req.get("windowDays") or DEFAULT_WINDOW_DAYS)
     val_days = int(req.get("valDays") or DEFAULT_VAL_DAYS)
     retrain_lgbm = bool(req.get("retrainLgbm", True))
     skip_same_cutoff = bool(req.get("skipTrainingIfSameCutoff", False))
+    publish_ranking = bool(req.get("publishRanking", True))
     allow_network = bool(req.get("allowNetwork", True))
     require_latest_hour = bool(req.get("requireLatestHour", True))
     retrain_interval_hours = int(req.get("chronosRetrainIntervalHours") or 6)
@@ -910,121 +964,220 @@ def handle_rolling_prepare_and_train_rank(req: dict[str, Any]) -> dict[str, Any]
     supp_f = Path(str(req["supplementalFundingCsv"])).resolve() if req.get("supplementalFundingCsv") else None
     universe_override = req.get("universeSymbols") if isinstance(req.get("universeSymbols"), list) else None
 
-    sync_res = sync_rolling_dataset(
-        data_dir=data_dir,
-        target_cutoff_ms=target_cutoff,
-        universe_symbols=universe_override,
-        window_days=window_days,
-        supplemental_klines_csv=supp_k,
-        supplemental_funding_csv=supp_f,
-        require_latest_hour=require_latest_hour,
-        allow_network=allow_network,
-    )
-    paths: Any = sync_res["paths"]
-    df_1h = sync_res["df_1h"]
-    df_funding = sync_res["df_funding"]
-    dataset_state = sync_res["state"]
+    live_paths = resolve_live_paths(data_dir)
+    error_path = live_paths.lgbm_root / "ranking_error.json"
 
-    need_retrain = retrain_lgbm or not paths.lgbm_current_path.is_file()
-    if need_retrain and skip_same_cutoff and paths.lgbm_current_path.is_file():
-        try:
-            existing_cur = json.loads(paths.lgbm_current_path.read_text(encoding="utf-8"))
-            if int(existing_cur.get("cutoffTime") or -1) == target_cutoff:
-                need_retrain = False
-        except Exception:
-            need_retrain = True
-
-    if need_retrain:
-        panel_df, _ = build_rolling_panel_and_splits(
-            df_1h=df_1h,
-            df_funding=df_funding,
+    try:
+        # Reject stale retries before synchronizing the mutable live dataset or models.
+        for pointer, field in (
+            (live_paths.state_path, "lastCutoffTime"),
+            (live_paths.lgbm_current_path, "cutoffTime"),
+            (live_paths.lgbm_root / "latest-ranking.json", "cutoffTime"),
+        ):
+            if pointer.is_file():
+                current = json.loads(pointer.read_text(encoding="utf-8"))
+                if int(current.get(field) or 0) > target_cutoff:
+                    raise DataNotReadyError("拒絕舊 cutoff 回退即時資料、模型或排名快照")
+        sync_res = sync_rolling_dataset(
+            data_dir=data_dir,
             target_cutoff_ms=target_cutoff,
+            universe_symbols=universe_override,
             window_days=window_days,
-            val_days=val_days,
+            supplemental_klines_csv=supp_k,
+            supplemental_funding_csv=supp_f,
+            require_latest_hour=require_latest_hour,
+            allow_network=allow_network,
         )
-        publish_rolling_lgbm_version(
-            panel_df=panel_df,
-            lgbm_root=paths.lgbm_root,
-            dataset_version=dataset_state["datasetVersion"],
-            cutoff_time=target_cutoff,
+        paths: Any = sync_res["paths"]
+        df_1h = sync_res["df_1h"]
+        df_funding = sync_res["df_funding"]
+        dataset_state = sync_res["state"]
+
+        deduped_same_cutoff = False
+        retrained_actual = False
+        need_retrain = retrain_lgbm or not paths.lgbm_current_path.is_file()
+        if need_retrain and skip_same_cutoff and paths.lgbm_current_path.is_file():
+            try:
+                existing_cur = json.loads(paths.lgbm_current_path.read_text(encoding="utf-8"))
+                if int(existing_cur.get("cutoffTime") or -1) == target_cutoff:
+                    need_retrain = False
+                    deduped_same_cutoff = True
+            except Exception:
+                need_retrain = True
+
+        if need_retrain:
+            panel_df, _ = build_rolling_panel_and_splits(
+                df_1h=df_1h,
+                df_funding=df_funding,
+                target_cutoff_ms=target_cutoff,
+                window_days=window_days,
+                val_days=val_days,
+            )
+            publish_rolling_lgbm_version(
+                panel_df=panel_df,
+                lgbm_root=paths.lgbm_root,
+                dataset_version=dataset_state["datasetVersion"],
+                cutoff_time=target_cutoff,
+            )
+            retrained_actual = True
+
+        long_booster, short_booster, lgbm_meta, lgbm_current = load_active_rolling_lightgbm(paths.lgbm_root)
+        if int(lgbm_current.get("cutoffTime") or 0) > target_cutoff:
+            raise DataNotReadyError("禁止以較新 cutoff 訓練的模型產生過去排名")
+
+        t0 = time.perf_counter()
+        ranking_res = rank_at_cutoff(
+            df_1h=df_1h,
+            long_booster=long_booster,
+            short_booster=short_booster,
+            feature_columns=lgbm_meta.get("feature_columns"),
+            cutoff_ms=target_cutoff,
+            df_funding=df_funding,
+            top_k=5,
+        )
+        lgbm_elapsed_ms = round((time.perf_counter() - t0) * 1000.0, 2)
+
+        expected_decision_open = target_cutoff - ONE_HOUR_MS
+        if ranking_res.get("status") != "OK" or int(ranking_res.get("decision_open_time") or -1) != expected_decision_open:
+            raise DataNotReadyError(
+                ranking_res.get("reason")
+                or f"最新已收盤決策小時不符：預期 {expected_decision_open}，實際 {ranking_res.get('decision_open_time')}"
+            )
+
+        conflict_set = set(str(s) for s in ranking_res.get("conflict_symbols", []))
+        chronos_targets = [str(s) for s in ranking_res.get("kronos_target_symbols", []) if str(s) not in conflict_set]
+        rolling_status = _inspect_rolling_pipeline_status(data_dir)
+        chronos_info = rolling_status["chronos2"]
+        last_chronos_trained = chronos_info.get("trainedAt")
+        chronos_train_due = (
+            (not chronos_info.get("ready"))
+            or (last_chronos_trained is None)
+            or ((int(time.time() * 1000) - int(last_chronos_trained)) >= retrain_interval_hours * ONE_HOUR_MS)
         )
 
-    long_booster, short_booster, lgbm_meta, lgbm_current = load_active_rolling_lightgbm(paths.lgbm_root)
+        finished_at_ms = int(time.time() * 1000)
+        total_wall_s = max(time.perf_counter() - wall_t0, 1e-6)
+        cpu_used_s = max(0.0, time.process_time() - cpu_t0)
+        cpu_percent = round((cpu_used_s / total_wall_s) * 100.0, 2)
+        rss_mb, peak_rss_mb = _sample_process_memory_mb()
+        train_audit: dict[str, Any] = {
+            "startedAt": started_at_ms,
+            "finishedAt": finished_at_ms,
+            "elapsedMs": round(total_wall_s * 1000.0, 2),
+            "cpuPercent": cpu_percent,
+            "rssMb": rss_mb,
+            "peakRssMb": peak_rss_mb,
+            "retrained": retrained_actual,
+            "dedupedSameCutoff": deduped_same_cutoff,
+        }
 
-    t0 = time.perf_counter()
-    ranking_res = rank_at_cutoff(
-        df_1h=df_1h,
-        long_booster=long_booster,
-        short_booster=short_booster,
-        feature_columns=lgbm_meta.get("feature_columns"),
-        cutoff_ms=target_cutoff,
-        df_funding=df_funding,
-        top_k=5,
-    )
-    lgbm_elapsed_ms = round((time.perf_counter() - t0) * 1000.0, 2)
+        snapshot_id = f"lgbm-{target_cutoff}-{lgbm_current['versionId']}"
+        published_at = finished_at_ms
+        expires_at = target_cutoff + ONE_HOUR_MS
 
-    expected_decision_open = target_cutoff - ONE_HOUR_MS
-    if ranking_res.get("status") != "OK" or int(ranking_res.get("decision_open_time") or -1) != expected_decision_open:
-        raise DataNotReadyError(
-            ranking_res.get("reason")
-            or f"最新已收盤決策小時不符：預期 {expected_decision_open}，實際 {ranking_res.get('decision_open_time')}"
-        )
-
-    conflict_set = set(str(s) for s in ranking_res.get("conflict_symbols", []))
-    chronos_targets = [str(s) for s in ranking_res.get("kronos_target_symbols", []) if str(s) not in conflict_set]
-    rolling_status = _inspect_rolling_pipeline_status(data_dir)
-    chronos_info = rolling_status["chronos2"]
-    last_chronos_trained = chronos_info.get("trainedAt")
-    chronos_train_due = (
-        (not chronos_info.get("ready"))
-        or (last_chronos_trained is None)
-        or ((int(time.time() * 1000) - int(last_chronos_trained)) >= retrain_interval_hours * ONE_HOUR_MS)
-    )
-
-    out_doc: dict[str, Any] = {
-        "inputMode": "live",
-        "replay": False,
-        "decisionOpenTime": int(ranking_res["decision_open_time"]),
-        "cutoffTime": int(ranking_res["cutoff_time"]),
-        "universeSymbols": sync_res["symbols"],
-        "eligibleCount": int(ranking_res["eligible_count"]),
-        "insufficientSymbols": ranking_res["insufficient_symbols"],
-        "longTop5": ranking_res["long_top5"],
-        "shortTop5": ranking_res["short_top5"],
-        "allRankings": ranking_res["all_rankings"],
-        "conflictSymbols": ranking_res["conflict_symbols"],
-        "kronosTargetSymbols": ranking_res["kronos_target_symbols"],
-        "chronosTargetSymbols": chronos_targets,
-        "datasetVersion": dataset_state["datasetVersion"],
-        "klinesPath": str(paths.klines_path),
-        "klinesSha256": dataset_state["klinesSha256"],
-        "fundingSha256": dataset_state["fundingSha256"],
-        "inputSha256": dataset_state["klinesSha256"],
-        "inputHashes": {
+        out_doc: dict[str, Any] = {
+            "snapshotId": snapshot_id,
+            "status": "SUCCESS",
+            "inputMode": "live",
+            "replay": False,
+            "decisionOpenTime": int(ranking_res["decision_open_time"]),
+            "cutoffTime": int(ranking_res["cutoff_time"]),
+            "expiresAt": expires_at,
+            "publishedAt": published_at,
+            "universeSymbols": sync_res["symbols"],
+            "eligibleCount": int(ranking_res["eligible_count"]),
+            "insufficientSymbols": ranking_res["insufficient_symbols"],
+            "longTop5": ranking_res["long_top5"],
+            "shortTop5": ranking_res["short_top5"],
+            "allRankings": ranking_res["all_rankings"],
+            "conflictSymbols": ranking_res["conflict_symbols"],
+            "kronosTargetSymbols": ranking_res["kronos_target_symbols"],
+            "chronosTargetSymbols": chronos_targets,
             "datasetVersion": dataset_state["datasetVersion"],
+            "klinesPath": str(paths.klines_path),
             "klinesSha256": dataset_state["klinesSha256"],
             "fundingSha256": dataset_state["fundingSha256"],
-        },
-        "lightgbm": {
-            "versionId": lgbm_current["versionId"],
-            "trainedAt": lgbm_current["trainedAt"],
-            "cutoffTime": lgbm_current["cutoffTime"],
-            "valNdcg5Long": lgbm_current["valNdcg5Long"],
-            "valNdcg5Short": lgbm_current["valNdcg5Short"],
-            "longSha256": lgbm_meta["long_model"]["sha256"],
-            "shortSha256": lgbm_meta["short_model"]["sha256"],
-            "selectedParamsLong": lgbm_meta["long_model"]["selected_params"],
-            "selectedParamsShort": lgbm_meta["short_model"]["selected_params"],
-            "elapsedMs": lgbm_elapsed_ms,
-        },
-        "chronosTrainDue": chronos_train_due,
-        "rollingPipeline": rolling_status,
-        "generatedAt": int(time.time() * 1000),
-    }
+            "inputSha256": dataset_state["klinesSha256"],
+            "inputHashes": {
+                "datasetVersion": dataset_state["datasetVersion"],
+                "klinesSha256": dataset_state["klinesSha256"],
+                "fundingSha256": dataset_state["fundingSha256"],
+            },
+            "lightgbm": {
+                "versionId": lgbm_current["versionId"],
+                "trainedAt": lgbm_current["trainedAt"],
+                "cutoffTime": lgbm_current["cutoffTime"],
+                "valNdcg5Long": lgbm_current["valNdcg5Long"],
+                "valNdcg5Short": lgbm_current["valNdcg5Short"],
+                "longSha256": lgbm_meta["long_model"]["sha256"],
+                "shortSha256": lgbm_meta["short_model"]["sha256"],
+                "selectedParamsLong": lgbm_meta["long_model"]["selected_params"],
+                "selectedParamsShort": lgbm_meta["short_model"]["selected_params"],
+                "elapsedMs": lgbm_elapsed_ms,
+            },
+            "trainAudit": train_audit,
+            "chronosTrainDue": chronos_train_due,
+            "rollingPipeline": rolling_status,
+            "generatedAt": finished_at_ms,
+        }
 
-    if req.get("outputPath"):
-        atomic_write_json(Path(str(req["outputPath"])).resolve(), out_doc)
-    return out_doc
+        if publish_ranking:
+            ranking_snapshot_doc: dict[str, Any] = {
+                "snapshotId": snapshot_id,
+                "status": "SUCCESS",
+                "decisionOpenTime": int(ranking_res["decision_open_time"]),
+                "cutoffTime": int(ranking_res["cutoff_time"]),
+                "generatedAt": finished_at_ms,
+                "publishedAt": published_at,
+                "expiresAt": expires_at,
+                "versionId": lgbm_current["versionId"],
+                "longSha256": lgbm_meta["long_model"]["sha256"],
+                "shortSha256": lgbm_meta["short_model"]["sha256"],
+                "trainedAt": lgbm_current["trainedAt"],
+                "universeSymbols": sync_res["symbols"],
+                "eligibleCount": int(ranking_res["eligible_count"]),
+                "insufficientSymbols": ranking_res["insufficient_symbols"],
+                "longTop5": ranking_res["long_top5"],
+                "shortTop5": ranking_res["short_top5"],
+                "allRankings": ranking_res["all_rankings"],
+                "conflictSymbols": ranking_res["conflict_symbols"],
+                "trainAudit": train_audit,
+            }
+            rankings_dir = paths.lgbm_root / "rankings"
+            rankings_dir.mkdir(parents=True, exist_ok=True)
+            atomic_write_json(rankings_dir / f"{target_cutoff}.json", ranking_snapshot_doc)
+            atomic_write_json(paths.lgbm_root / "latest-ranking.json", ranking_snapshot_doc)
+            if error_path.exists():
+                error_path.unlink(missing_ok=True)
+
+        if req.get("outputPath"):
+            atomic_write_json(Path(str(req["outputPath"])).resolve(), out_doc)
+        return out_doc
+    except Exception as exc:
+        if publish_ranking:
+            try:
+                atomic_write_json(
+                    error_path,
+                    {
+                        "cutoffTime": target_cutoff,
+                        "startedAt": started_at_ms,
+                        "failedAt": int(time.time() * 1000),
+                        "error": str(exc),
+                    },
+                )
+            except Exception:
+                pass
+        raise
+
+
+def handle_rolling_update_lgbm_rank(req: dict[str, Any]) -> dict[str, Any]:
+    """Standalone hourly LightGBM sync, retrain & ranking publication without Chronos-2."""
+    merged = {
+        **req,
+        "publishRanking": True,
+        "skipTrainingIfSameCutoff": True,
+    }
+    return handle_rolling_prepare_and_train_rank(merged)
 
 
 def handle_commit_rolling_research(req: dict[str, Any]) -> dict[str, Any]:
@@ -1283,6 +1436,10 @@ def main() -> int:
                 return 0
             elif action == "rolling_prepare_and_train_rank":
                 res = handle_rolling_prepare_and_train_rank(req)
+                emit_protocol({"event": "result", "data": res})
+                return 0
+            elif action == "rolling_update_lgbm_rank":
+                res = handle_rolling_update_lgbm_rank(req)
                 emit_protocol({"event": "result", "data": res})
                 return 0
             elif action == "commit_rolling_research":

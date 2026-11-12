@@ -57,9 +57,6 @@ function hasPendingFundingBoundary(
 
   for (const pos of positions) {
     if (pos.account !== account) continue;
-    if (pos.status === 'CLOSED' && (pos.closedAt == null || pos.closedAt < now - EIGHT_HOURS_MS)) {
-      continue;
-    }
     const entryFill = entryByPos.get(pos.id);
     if (!entryFill) continue;
     const exitFill = exitByPos.get(pos.id);
@@ -171,17 +168,27 @@ export class FundingSettler {
 
     const positions = await this.store.listPositions(experimentId);
     const fills = await this.store.listFills(experimentId);
+    const charges = await this.store.listFunding(experimentId);
     const filterSet = symbolsFilter?.length ? new Set(symbolsFilter.map(s => s.toUpperCase())) : null;
 
-    // Symbols currently held or closed within past 8h
+    // Fetch from the oldest unsettled boundary, including positions closed during an outage.
     const symbolStartTimes = new Map<string, number>();
     for (const pos of positions) {
-      if (pos.status === 'CLOSED' && (pos.closedAt == null || pos.closedAt < now - EIGHT_HOURS_MS)) {
-        continue;
-      }
       if (filterSet && !filterSet.has(pos.symbol)) continue;
       const entryFill = fills.find(f => f.positionId === pos.id && (f.action === 'ENTRY' || f.receivedAt === pos.openedAt));
-      const refTime = entryFill?.tradeTime ?? pos.openedAt;
+      if (!entryFill) continue;
+      const exitFill = fills.find(f => f.positionId === pos.id && (f.action === 'EXIT' || (pos.closedAt != null && f.receivedAt === pos.closedAt)));
+      const endTime = pos.status === 'CLOSED' && exitFill ? exitFill.tradeTime : now;
+      let refTime: number | null = null;
+      for (let boundary = (Math.floor(entryFill.tradeTime / EIGHT_HOURS_MS) + 1) * EIGHT_HOURS_MS;
+        pos.status === 'CLOSED' && exitFill ? boundary < endTime : boundary <= endTime;
+        boundary += EIGHT_HOURS_MS) {
+        if (!charges.some(c => c.positionId === pos.id && Math.abs(c.fundingTime - boundary) <= 60_000)) {
+          refTime = boundary;
+          break;
+        }
+      }
+      if (refTime === null) continue;
       const prev = symbolStartTimes.get(pos.symbol);
       if (prev === undefined || refTime < prev) {
         symbolStartTimes.set(pos.symbol, refTime);
@@ -242,9 +249,7 @@ export class FundingSettler {
         }
 
         const allChargesForAcc = [...accCharges, ...applied.charges];
-        const hasActiveOrRecent = accPositions.some(
-          p => p.status === 'OPEN' || (p.closedAt != null && p.closedAt >= now - EIGHT_HOURS_MS),
-        );
+        const hasRelevantPositions = accPositions.some(p => symbolStartTimes.has(p.symbol));
         const boundaryPending = hasPendingFundingBoundary(
           accId,
           accPositions,
@@ -252,7 +257,7 @@ export class FundingSettler {
           allChargesForAcc,
           now,
         );
-        applied.account.fundingPending = boundaryPending || (fetchFailed && hasActiveOrRecent);
+        applied.account.fundingPending = boundaryPending || (fetchFailed && hasRelevantPositions);
 
         const openAccPos = accPositions.filter(p => p.status === 'OPEN');
         const val = valuate(applied.account, openAccPos, lastPrices);

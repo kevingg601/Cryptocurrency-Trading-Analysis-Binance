@@ -41,6 +41,7 @@ export interface ForwardSchedulerOptions {
   forwardInference: ForwardInferenceCoordinator;
   getRules: () => Promise<Record<string, AutoSymbolRules>>;
   isLeaseOwned: (experimentId: string) => boolean;
+  onStateChanged?: () => void;
   clock?: SchedulerClock;
 }
 
@@ -57,6 +58,7 @@ export class ForwardScheduler {
   readonly clock: SchedulerClock;
   private readonly getRules: () => Promise<Record<string, AutoSymbolRules>>;
   private readonly isLeaseOwned: (experimentId: string) => boolean;
+  private readonly onStateChanged?: () => void;
 
   private readonly timers = new Map<string, ExperimentTimers>();
   private readonly inFlightHours = new Set<string>();
@@ -69,6 +71,7 @@ export class ForwardScheduler {
     this.forwardInference = options.forwardInference;
     this.getRules = options.getRules;
     this.isLeaseOwned = options.isLeaseOwned;
+    this.onStateChanged = options.onStateChanged;
     this.clock = options.clock ?? defaultSchedulerClock;
   }
 
@@ -255,8 +258,7 @@ export class ForwardScheduler {
       }
 
       // Submission gate (Step 8)
-      const submitNow = this.clock.now();
-      if (submitNow >= deadline) {
+      if (this.clock.now() >= deadline) {
         await this.store.updateDecision({
           id: claim.decision.id,
           status: 'SKIPPED',
@@ -292,6 +294,35 @@ export class ForwardScheduler {
         return;
       }
 
+      let rules: Record<string, AutoSymbolRules>;
+      try {
+        rules = await this.getRules();
+      } catch (err: any) {
+        await this.handleBusyOrDataNotReady(
+          exp, claim.decision.id, targetHourH,
+          `取得交易規則失敗：${err?.message || String(err)}`, deadline,
+        );
+        return;
+      }
+      const submitNow = this.clock.now();
+      if (submitNow >= deadline) {
+        await this.store.updateDecision({
+          id: claim.decision.id,
+          status: 'SKIPPED',
+          reason: '取得交易規則時已超過決策期限，不予提交',
+        });
+        return;
+      }
+      const readyExp = await this.store.getExperiment(exp.id);
+      if (!readyExp || readyExp.status !== 'RUNNING' || !this.isLeaseOwned(exp.id)) {
+        await this.store.updateDecision({
+          id: claim.decision.id,
+          status: 'SKIPPED',
+          reason: '取得交易規則時實驗狀態已變更',
+        });
+        return;
+      }
+
       // Build signals using live Futures aggTrade reference prices at submission time (D4)
       const targetSymbols = Array.from(
         new Set([
@@ -312,7 +343,6 @@ export class ForwardScheduler {
         config: freshExp.config,
       });
 
-      const rules = await this.getRules();
       const lastPrices = this.tradeBus.getLastPrices();
 
       let finalSignalsDoc: Record<string, unknown> = {};
@@ -428,6 +458,7 @@ export class ForwardScheduler {
           tx,
         );
       });
+      this.onStateChanged?.();
     } finally {
       this.inFlightHours.delete(lockKey);
     }
@@ -540,5 +571,6 @@ export class ForwardScheduler {
         );
       }
     });
+    this.onStateChanged?.();
   }
 }

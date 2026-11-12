@@ -37,7 +37,10 @@ export interface WriterStats {
   totalTradesWritten: number;
   totalKlinesWritten: number;
   writeRatePerSec: number;
+  queueOverflows: number;
 }
+
+const MAX_QUEUED_ITEMS = 50_000;
 
 export class StorageWriter {
   private tradeQueue: StoredAggTrade[] = [];
@@ -50,6 +53,9 @@ export class StorageWriter {
   private tradesWrittenInWindow = 0;
   private lastRateCheck = Date.now();
   private currentRate = 0;
+  private queueOverflows = 0;
+  private overflowed = false;
+  private onOverflow: ((kind: 'trades' | 'klines', depth: number) => void) | null = null;
 
   private client: DuckDBClient;
   private maxBatchSize: number;
@@ -63,6 +69,14 @@ export class StorageWriter {
     this.client = client;
     this.maxBatchSize = maxBatchSize;
     this.flushIntervalMs = flushIntervalMs;
+  }
+
+  setOverflowHandler(handler: (kind: 'trades' | 'klines', depth: number) => void): void {
+    this.onOverflow = handler;
+  }
+
+  isOverflowed(): boolean {
+    return this.overflowed;
   }
 
   start() {
@@ -90,25 +104,51 @@ export class StorageWriter {
     } while (this.tradeQueue.length || this.klineQueue.length);
   }
 
-  pushAggTrade(trade: StoredAggTrade) {
+  pushAggTrade(trade: StoredAggTrade): boolean {
+    if (this.overflowed || this.tradeQueue.length >= MAX_QUEUED_ITEMS) {
+      this.signalOverflow('trades', this.tradeQueue.length);
+      return false;
+    }
     this.tradeQueue.push(trade);
     if (this.tradeQueue.length >= this.maxBatchSize && !this.isFlushing) {
       this.flush().catch((err) => console.error('Batch size flush error:', err));
     }
+    return true;
   }
 
-  pushKline(kline: StoredKline1m) {
+  pushKline(kline: StoredKline1m): boolean {
+    if (this.overflowed || this.klineQueue.length >= MAX_QUEUED_ITEMS) {
+      this.signalOverflow('klines', this.klineQueue.length);
+      return false;
+    }
     this.klineQueue.push(kline);
     if (this.klineQueue.length >= this.maxBatchSize && !this.isFlushing) {
       this.flush().catch((err) => console.error('Batch size flush error:', err));
     }
+    return true;
+  }
+
+  private signalOverflow(kind: 'trades' | 'klines', depth: number): void {
+    if (this.overflowed) return;
+    this.overflowed = true;
+    this.queueOverflows += 1;
+    const message = `[Collector] Storage ${kind} queue exceeded ${MAX_QUEUED_ITEMS} items; stopping ingestion for recovery`;
+    console.error(message);
+    if (this.onOverflow) this.onOverflow(kind, depth);
+    else throw new Error(message);
   }
 
   flush(): Promise<{ tradesWritten: number; klinesWritten: number }> {
-    if (this.activeFlush) {
-      return this.activeFlush.then(() => this.flush());
-    }
-    this.activeFlush = this.flushBatch().finally(() => { this.activeFlush = null; });
+    if (this.activeFlush) return this.activeFlush;
+    this.activeFlush = (async () => {
+      const total = { tradesWritten: 0, klinesWritten: 0 };
+      do {
+        const batch = await this.flushBatch();
+        total.tradesWritten += batch.tradesWritten;
+        total.klinesWritten += batch.klinesWritten;
+      } while (this.tradeQueue.length > 0 || this.klineQueue.length > 0);
+      return total;
+    })().finally(() => { this.activeFlush = null; });
     return this.activeFlush;
   }
 
@@ -244,6 +284,7 @@ export class StorageWriter {
       totalTradesWritten: this.totalTradesWritten,
       totalKlinesWritten: this.totalKlinesWritten,
       writeRatePerSec: Math.round(this.currentRate),
+      queueOverflows: this.queueOverflows,
     };
   }
 }

@@ -349,6 +349,7 @@ export default function ModelPaperPanel({ theme = 'dark' }: ModelPaperPanelProps
 
   const activeExp = useMemo(() => findActiveExperiment(experiments), [experiments]);
   const chronosReady = Boolean(rollingPipeline?.chronos2?.ready);
+  const chronosPaused = Boolean(rollingPipeline?.trainingPaused ?? rollingPipeline?.chronos2?.paused ?? false);
   const isChronosTraining = Boolean(rollingPipeline?.chronos2?.isTraining || rollingPipeline?.autoSchedule?.isTrainingChronos);
 
   const handleBootstrapChronos = async () => {
@@ -508,21 +509,30 @@ export default function ModelPaperPanel({ theme = 'dark' }: ModelPaperPanelProps
           {!activeExp && (
             <>
               <span className="mp-status-badge" style={{ background: 'rgba(59, 130, 246, 0.14)', color: '#93c5fd' }}>
-                {isChronosTraining
-                  ? 'Chronos-2 本機 GPU 訓練中...'
-                  : chronosReady
-                    ? `本機就緒：${rollingPipeline?.chronos2?.versionId}`
-                    : '尚未完成本機 Chronos-2 首次 GPU 微調'}
+                {chronosPaused
+                  ? 'Chronos-2 GPU 訓練已暫停（僅維持 LightGBM 每小時獨立更新）'
+                  : isChronosTraining
+                    ? 'Chronos-2 本機 GPU 訓練中...'
+                    : chronosReady
+                      ? `本機就緒：${rollingPipeline?.chronos2?.versionId}`
+                      : '尚未完成本機 Chronos-2 首次 GPU 微調'}
               </span>
               {!chronosReady && (
                 <button
                   type="button"
                   className="mp-btn mp-btn-warn"
-                  disabled={Boolean(busyAction) || isChronosTraining}
+                  disabled={chronosPaused || Boolean(busyAction) || isChronosTraining}
                   onClick={() => void handleBootstrapChronos()}
+                  title={chronosPaused ? (rollingPipeline?.pausedReason || 'Chronos-2 GPU 訓練目前已暫停') : undefined}
                 >
-                  <RefreshCw size={14} className={isChronosTraining ? 'spinning' : ''} />
-                  <span>{isChronosTraining ? 'GPU 微調中...' : '執行首次本機 GPU 微調'}</span>
+                  <RefreshCw size={14} className={isChronosTraining && !chronosPaused ? 'spinning' : ''} />
+                  <span>
+                    {chronosPaused
+                      ? '本機 GPU 微調（目前暫停）'
+                      : isChronosTraining
+                        ? 'GPU 微調中...'
+                        : '執行首次本機 GPU 微調'}
+                  </span>
                 </button>
               )}
               <button

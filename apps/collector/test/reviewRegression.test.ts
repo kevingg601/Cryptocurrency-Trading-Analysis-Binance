@@ -24,6 +24,19 @@ const trade = (id: number): StoredAggTrade => ({
   trade_time: 1700000000000 + id, recv_time: 1700000000000 + id, is_buyer_maker: false, source: 'ws',
 });
 
+test('writer bounds queued trades and signals overflow once', () => {
+  const writer = new StorageWriter({} as any, 100_000);
+  const overflows: Array<{ kind: string; depth: number }> = [];
+  writer.setOverflowHandler((kind, depth) => overflows.push({ kind, depth }));
+  const item = trade(1);
+  for (let i = 0; i < 50_000; i++) assert.equal(writer.pushAggTrade(item), true);
+  assert.equal(writer.pushAggTrade(item), false);
+  assert.equal(writer.pushAggTrade(item), false);
+  assert.deepEqual(overflows, [{ kind: 'trades', depth: 50_000 }]);
+  assert.equal(writer.getStats().queueDepthTrades, 50_000);
+  assert.equal(writer.getStats().queueOverflows, 1);
+});
+
 async function fixture(t: test.TestContext, token?: string) {
   const db = await createDuckDBClient();
   t.after(() => db.close());
@@ -330,4 +343,69 @@ test('DuckDB worker survives a query error and rejects new queries after close',
   assert.equal((await db.all('SELECT 1 AS n'))[0].n, 1);
   await db.close();
   await assert.rejects(db.all('SELECT 1'), /closing/);
+});
+
+test('backfillGap caps concurrency at 2, respects StorageWriter backpressure, and aborts queued slots cleanly', async t => {
+  const { db, writer, detector } = await fixture(t);
+  const symbols = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'DOGEUSDT'];
+  const gaps = [];
+  for (const sym of symbols) {
+    await detector.checkAggTrade(sym, 100, 1000);
+    gaps.push((await detector.checkAggTrade(sym, 105, 2000))!);
+  }
+
+  let inFlight = 0;
+  let maxInFlight = 0;
+  t.mock.method(globalThis, 'fetch', async (input: string) => {
+    inFlight += 1;
+    maxInFlight = Math.max(maxInFlight, inFlight);
+    await new Promise(r => setTimeout(r, 15));
+    try {
+      const params = new URL(input).searchParams;
+      const start = Number(params.get('fromId'));
+      const limit = Number(params.get('limit'));
+      const data = Array.from({ length: limit }, (_, idx) => ({ a: start + idx, p: '100', q: '1', T: 1500 + idx, m: false }));
+      return new Response(JSON.stringify(data));
+    } finally {
+      inFlight -= 1;
+    }
+  });
+
+  // Pre-seed writer with 16,000 queued items (>= 15,000 high-water mark) using high batch size temporarily
+  // Real fixture writer has maxBatchSize=5000, so pushing 16,000 items won't overflow and exercises waitForWriterHeadroom
+  const preOverflowWriter = new StorageWriter(db, 100_000, 60_000);
+  const overflows: string[] = [];
+  preOverflowWriter.setOverflowHandler((kind) => overflows.push(kind));
+  for (let i = 1; i <= 16_000; i++) {
+    preOverflowWriter.pushAggTrade({ ...trade(i), symbol: 'PRELOADUSDT' });
+  }
+  assert.equal(preOverflowWriter.getStats().queueDepthTrades, 16_000);
+
+  const results = await Promise.all(gaps.map(g => backfillGap(g, preOverflowWriter, detector)));
+  assert.deepEqual(results, gaps.map(() => true));
+  assert.ok(maxInFlight >= 1 && maxInFlight <= 2, `Expected maxInFlight <= 2, got ${maxInFlight}`);
+  assert.equal(overflows.length, 0);
+  assert.equal(preOverflowWriter.getStats().queueOverflows, 0);
+  await preOverflowWriter.stop();
+
+  // Verify abort cancels queued gaps cleanly without hanging
+  const ac = new AbortController();
+  const qGaps = [];
+  for (let i = 0; i < 4; i++) {
+    const sym = `ABORT${i}USDT`;
+    await detector.checkAggTrade(sym, 100, 1000);
+    qGaps.push((await detector.checkAggTrade(sym, 103, 2000))!);
+  }
+  let releaseHold!: () => void;
+  const holdGate = new Promise<void>(r => { releaseHold = r; });
+  t.mock.method(globalThis, 'fetch', async () => {
+    await holdGate;
+    return new Response('aborted', { status: 499 });
+  });
+  const abortPromises = qGaps.map(g => backfillGap(g, writer, detector, ac.signal));
+  await new Promise(r => setTimeout(r, 10));
+  ac.abort();
+  releaseHold();
+  const abortResults = await Promise.all(abortPromises);
+  assert.deepEqual(abortResults, [false, false, false, false]);
 });

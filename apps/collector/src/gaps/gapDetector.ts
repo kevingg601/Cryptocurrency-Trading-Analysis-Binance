@@ -60,6 +60,23 @@ export class GapDetector {
   }
 
   checkAggTrade(symbol: string, aggId: number, tradeTime: number): Promise<DetectedGap | null> {
+    if (
+      this.initialized &&
+      !this.checks.has(symbol) &&
+      Number.isSafeInteger(aggId) &&
+      aggId >= 0 &&
+      Number.isSafeInteger(tradeTime) &&
+      tradeTime >= 0
+    ) {
+      const last = this.lastTradePerSymbol.get(symbol);
+      if (last) {
+        if (aggId <= last.agg_id) return Promise.resolve(null);
+        if (aggId === last.agg_id + 1) {
+          this.lastTradePerSymbol.set(symbol, { agg_id: aggId, trade_time: tradeTime });
+          return Promise.resolve(null);
+        }
+      }
+    }
     const previous = this.checks.get(symbol) ?? Promise.resolve();
     const checking = previous.catch(() => {}).then(() => this.inspectTrade(symbol, aggId, tradeTime));
     this.checks.set(symbol, checking);

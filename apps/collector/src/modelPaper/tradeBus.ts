@@ -9,6 +9,8 @@ export interface TradeBusTradeEvent {
   aggId: number;
   tradeTime: number;
   receivedAt: number;
+  side?: 'buy' | 'sell';
+  lastTradeId?: number;
 }
 
 export class TradeBus extends EventEmitter {

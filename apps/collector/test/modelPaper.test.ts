@@ -490,6 +490,7 @@ test('FundingSettler: strict tradeTime window, during_gap flag, funding_pending 
     });
 
     let shouldFailFetch = true;
+    let includeSecondBoundary = false;
     const settler = new FundingSettler({
       store,
       clock,
@@ -502,6 +503,7 @@ test('FundingSettler: strict tradeTime window, during_gap flag, funding_pending 
           { symbol: sym, fundingTime: boundary08 - EIGHT_HOURS_MS, fundingRate: 0.001, markPrice: 99 },
           // Inside [entryTradeTime, now] & during gap -> charged once
           { symbol: sym, fundingTime: boundary08, fundingRate: 0.001, markPrice: 100 },
+          ...(includeSecondBoundary ? [{ symbol: sym, fundingTime: boundary08 + EIGHT_HOURS_MS, fundingRate: 0.001, markPrice: 100 }] : []),
         ];
       },
     });
@@ -525,6 +527,30 @@ test('FundingSettler: strict tradeTime window, during_gap flag, funding_pending 
     await settler.settleExperiment(exp.id);
     assert.equal((await store.listFunding(exp.id, 'A')).length, 1);
     assert.ok(Math.abs((await store.getAccount(exp.id, 'A'))!.funding - 0.2) < 1e-9);
+
+    // A missed funding boundary remains recoverable even after the position
+    // has been closed for more than eight hours.
+    const secondBoundary = boundary08 + EIGHT_HOURS_MS;
+    const exitTime = secondBoundary + 60_000;
+    await store.insertOrderIfAbsent({
+      id: 'ord-a-exit', experimentId: exp.id, account: 'A', decisionId: 'dec-1',
+      symbol: 'BTCUSDT', side: 'LONG', action: 'EXIT', reason: 'MANUAL_STOP',
+      qty: 2, refPrice: 100, createdAt: exitTime, status: 'FILLED',
+      cancelReason: null, positionId: posA.id,
+    });
+    await store.insertFillIfAbsent({
+      orderId: 'ord-a-exit', experimentId: exp.id, account: 'A', symbol: 'BTCUSDT',
+      action: 'EXIT', aggId: 2, tradeTime: exitTime, receivedAt: exitTime,
+      rawPrice: 100, fillPrice: 100, qty: 2, fee: 0.08, slippageCost: 0,
+      realizedPnl: 0, positionId: posA.id,
+    });
+    await store.upsertPosition({ ...posA, status: 'CLOSED', closedAt: exitTime,
+      exitPrice: 100, exitReason: 'MANUAL_STOP' });
+    clock.advanceTo(exitTime + EIGHT_HOURS_MS + ONE_HOUR_MS);
+    includeSecondBoundary = true;
+    await settler.settleExperiment(exp.id);
+    assert.equal((await store.listFunding(exp.id, 'A')).length, 2);
+    assert.equal((await store.getAccount(exp.id, 'A'))!.fundingPending, false);
   } finally {
     await client.close();
     fs.rmSync(tmpDir, { recursive: true, force: true });
@@ -546,6 +572,7 @@ test('ForwardScheduler: immediate + HH:00:30 timing, BUSY/DATA_NOT_READY/FAILED 
     const clock = new FakeClock(hour10 + 30_000);
     const universe = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'ADAUSDT', 'DOGEUSDT', 'AVAXUSDT', 'DOTUSDT', 'LINKUSDT'];
     const rules = makeRules(universe);
+    let ruleFetchFails = false;
 
     const exp = makeExp('exp-sched', clock.now(), universe);
     await store.withTx(async (tx) => {
@@ -610,7 +637,10 @@ test('ForwardScheduler: immediate + HH:00:30 timing, BUSY/DATA_NOT_READY/FAILED 
       store,
       tradeBus,
       forwardInference: mockCoord,
-      getRules: async () => rules,
+      getRules: async () => {
+        if (ruleFetchFails) throw new Error('exchange info unavailable');
+        return rules;
+      },
       isLeaseOwned: () => true,
       clock,
     });
@@ -648,9 +678,17 @@ test('ForwardScheduler: immediate + HH:00:30 timing, BUSY/DATA_NOT_READY/FAILED 
     assert.equal((await store.getDecisionByHour(exp.id, 'chronos2', hour09))?.status, 'FAILED');
     assert.equal((await store.listOrders(exp.id)).length, 0);
 
-    // 5. Succeeds within +10m -> SUBMITTED, same-hour dedup blocks duplicate run
+    // 5. Rule lookup failure must become retryable rather than leave PENDING forever.
     mode = 'ok';
-    clock.advanceTo(hour10 + 150_000);
+    ruleFetchFails = true;
+    clock.advanceTo(hour10 + 130_000);
+    await scheduler.triggerHour(exp.id, hour09);
+    assert.equal((await store.getDecisionByHour(exp.id, 'chronos2', hour09))?.status, 'PENDING_RETRY');
+
+    // 6. Succeeds within +10m -> SUBMITTED, same-hour dedup blocks duplicate run
+    ruleFetchFails = false;
+    mode = 'ok';
+    clock.advanceTo(hour10 + 160_000);
     await clock.flushDue();
     await scheduler.flush();
     const dec = await store.getDecisionByHour(exp.id, 'chronos2', hour09);
@@ -1437,6 +1475,224 @@ test('PaperExecutor: startup stream connection grace (staleMs) vs post-connect d
     assert.equal(clock8.timers.size, 1);
     exec8.stop();
     await exec8.flush();
+  } finally {
+    await client.close();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('PaperExecutor live stream filter skips non-actionable aggTrades without DuckDB transactions and still fills entries & stop-losses deterministically', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'fadachi-mp-burst-'));
+  const client = await createDuckDBClient(path.join(tmpDir, 'test.duckdb'));
+  await initDatabase(client, SCHEMA_PATH);
+
+  let dbOps = 0;
+  const origAll = client.all.bind(client);
+  const origRun = client.run.bind(client);
+  const origExec = client.exec.bind(client);
+  client.all = ((sql: string, ...params: any[]) => {
+    dbOps += 1;
+    return origAll(sql, ...params);
+  }) as typeof client.all;
+  client.run = ((sql: string, ...params: any[]) => {
+    dbOps += 1;
+    return origRun(sql, ...params);
+  }) as typeof client.run;
+  client.exec = ((sql: string) => {
+    dbOps += 1;
+    return origExec(sql);
+  }) as typeof client.exec;
+
+  try {
+    const store = new ModelPaperStore(client);
+    const symbols = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'DOGEUSDT'];
+    const rules = makeRules(symbols);
+    const baseNow = 1_700_000_000_000;
+    const exp: ModelPaperExperimentRecord = {
+      id: 'exp-burst-1',
+      createdAt: baseNow,
+      status: 'RUNNING',
+      config: { ...DEFAULT_MODEL_PAPER_CONFIG },
+      modelKey: 'chronos2',
+      modelSource: {
+        pipelineMode: 'local-rolling',
+        retrainIntervalHours: 6,
+        adapterRunId: 'v1',
+        adapterRunDir: tmpDir,
+        attemptDir: tmpDir,
+        artifactHashes: {},
+        baseRepoId: 'amazon/chronos-2',
+        baseRevision: 'rev',
+        baseFiles: {},
+      },
+      universe: symbols,
+      startedAt: baseNow,
+      stoppedAt: null,
+      heartbeatAt: baseNow,
+      statusReason: null,
+    };
+    const makeAcc = (account: 'A' | 'B'): PaperAccountState => ({
+      experimentId: exp.id,
+      account,
+      cash: 10_000,
+      reserved: 0,
+      realizedPnl: 0,
+      fees: 0,
+      funding: 0,
+      bankrupt: false,
+      degraded: false,
+      fundingPending: false,
+      stoppedThisHour: [],
+      updatedAt: baseNow,
+    });
+
+    await store.insertExperiment(exp);
+    await store.insertAccounts([makeAcc('A'), makeAcc('B')]);
+    await store.insertOrderIfAbsent({
+      id: 'ord-btc-entry',
+      experimentId: exp.id,
+      account: 'A',
+      decisionId: 'dec-1',
+      symbol: 'BTCUSDT',
+      side: 'LONG',
+      action: 'ENTRY',
+      reason: 'SIGNAL',
+      qty: 1,
+      refPrice: 100,
+      createdAt: baseNow,
+      status: 'PENDING',
+      cancelReason: null,
+      positionId: null,
+    });
+
+    const clock = new FakeClock(baseNow);
+    const bus = new TradeBus();
+    bus.emitStatus({ status: 'connected', lastValidAt: baseNow, totalMessages: 1, activeSockets: 1 });
+    const exec = new PaperExecutor({
+      store,
+      tradeBus: bus,
+      clock,
+      getOwnedExperimentIds: () => [exp.id],
+      getRules: () => rules,
+    });
+    exec.start();
+    await exec.runMonitorTick(baseNow);
+
+    // 1. Blast 2,000 non-actionable aggTrades across idle symbols & pre-250ms BTCUSDT -> 0 DuckDB ops
+    dbOps = 0;
+    let aggSeq = 1;
+    for (let i = 0; i < 2_000; i++) {
+      const sym = symbols[i % symbols.length];
+      bus.emitTrade({
+        symbol: sym,
+        price: 100 + (i % 5) * 0.01,
+        qty: 1,
+        aggId: ++aggSeq,
+        tradeTime: baseNow + 100,
+        receivedAt: baseNow + 200,
+      });
+    }
+    await exec.flush();
+    assert.equal(dbOps, 0);
+
+    // 2. Eligible trade arrives at >= 250ms -> fills order cleanly
+    clock.advanceTo(baseNow + 250);
+    bus.emitTrade({
+      symbol: 'BTCUSDT',
+      price: 100,
+      qty: 1,
+      aggId: ++aggSeq,
+      tradeTime: baseNow + 250,
+      receivedAt: baseNow + 250,
+    });
+    await exec.flush();
+    const fillsAfterEntry = await store.listFills(exp.id, 'A');
+    assert.equal(fillsAfterEntry.length, 1);
+    assert.equal(fillsAfterEntry[0].action, 'ENTRY');
+
+    // 3. Blast 2,000 open-position non-stop trades above stopPrice -> 0 DuckDB ops
+    const openPos = (await store.listPositions(exp.id, 'A', 'OPEN'))[0];
+    assert.ok(openPos);
+    dbOps = 0;
+    for (let i = 0; i < 2_000; i++) {
+      const sym = symbols[i % symbols.length];
+      bus.emitTrade({
+        symbol: sym,
+        price: openPos.stopPrice + 1 + (i % 3),
+        qty: 1,
+        aggId: ++aggSeq,
+        tradeTime: baseNow + 300 + (i % 50),
+        receivedAt: baseNow + 300 + (i % 50),
+      });
+    }
+    await exec.flush();
+    assert.equal(dbOps, 0);
+
+    // A pending order keeps three same-symbol ticks actionable. The middle tick
+    // crosses the stop and must survive the burst even though the last rebounds.
+    await store.insertOrderIfAbsent({
+      id: 'ord-btc-entry-b', experimentId: exp.id, account: 'B', decisionId: 'dec-1',
+      symbol: 'BTCUSDT', side: 'LONG', action: 'ENTRY', reason: 'SIGNAL',
+      qty: 1, refPrice: 100, createdAt: baseNow + 200,
+      status: 'PENDING', cancelReason: null, positionId: null,
+    });
+    exec.invalidateWatchCache();
+    await exec.runMonitorTick(baseNow + 400);
+    for (const [price, offset] of [
+      [openPos.stopPrice + 1, 500],
+      [openPos.stopPrice - 0.5, 501],
+      [openPos.stopPrice + 1, 502],
+    ] as const) {
+      bus.emitTrade({ symbol: 'BTCUSDT', price, qty: 1, aggId: ++aggSeq,
+        tradeTime: baseNow + offset, receivedAt: baseNow + offset });
+    }
+    await exec.flush();
+    assert.equal((await store.listPendingOrders(exp.id, 'A')).some(o => o.reason === 'STOP_LOSS'), true);
+
+    // 4. Price crosses stopPrice -> triggers STOP_LOSS exit order and fills after exit delay
+    bus.emitTrade({
+      symbol: 'BTCUSDT',
+      price: openPos.stopPrice - 0.5,
+      qty: 1,
+      aggId: ++aggSeq,
+      tradeTime: baseNow + 500,
+      receivedAt: baseNow + 500,
+    });
+    await exec.flush();
+    const ordersAfterStop = await store.listPendingOrders(exp.id, 'A');
+    assert.equal(ordersAfterStop.some(o => o.reason === 'STOP_LOSS'), true);
+
+    bus.emitTrade({
+      symbol: 'BTCUSDT',
+      price: openPos.stopPrice - 0.5,
+      qty: 1,
+      aggId: ++aggSeq,
+      tradeTime: baseNow + 760,
+      receivedAt: baseNow + 760,
+    });
+    await exec.flush();
+    const closedPos = await store.listPositions(exp.id, 'A', 'CLOSED');
+    assert.equal(closedPos.length, 1);
+
+    await store.insertOrderIfAbsent({
+      id: 'ord-overflow', experimentId: exp.id, account: 'A', decisionId: 'dec-2',
+      symbol: 'ETHUSDT', side: 'LONG', action: 'ENTRY', reason: 'SIGNAL',
+      qty: 1, refPrice: 100, createdAt: baseNow + 500,
+      status: 'PENDING', cancelReason: null, positionId: null,
+    });
+    exec.invalidateWatchCache();
+    await exec.runMonitorTick(baseNow + 800);
+    for (let i = 0; i <= 4_096; i++) {
+      bus.emitTrade({ symbol: 'ETHUSDT', price: 100, qty: 1, aggId: ++aggSeq,
+        tradeTime: baseNow + 800 + i, receivedAt: baseNow + 800 + i });
+    }
+    await exec.flush();
+    assert.equal((await store.getExperiment(exp.id))?.status, 'AWAITING_RESUME');
+    assert.equal((await store.listGaps(exp.id)).some(g => g.kind === 'EXECUTOR_OVERLOAD'), true);
+    assert.equal((await store.listPendingOrders(exp.id)).some(o => o.id === 'ord-overflow'), false);
+
+    exec.stop();
+    await exec.flush();
   } finally {
     await client.close();
     fs.rmSync(tmpDir, { recursive: true, force: true });

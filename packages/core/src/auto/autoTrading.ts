@@ -2,8 +2,15 @@ import type { MarketType } from '../market/types.ts';
 import type { FollowPlan } from '../follow/followPlans.ts';
 import type { MarketTradeFrame } from '../market/marketEvents.ts';
 import type { AutoFundingRecord, AutoSymbolRules } from './autoTradingMarket.ts';
+import {
+  FOUR_GROUP_D_BREAKEVEN_BUFFER_PCT,
+  FOUR_GROUP_D_STOP_LOSS_PCT,
+  FOUR_GROUP_D_TRAILING_ACTIVATE_PCT,
+  FOUR_GROUP_D_TRAILING_PULLBACK_PCT,
+} from './fourGroupTypes.ts';
 
 export type AutoTradingStatus = 'IDLE' | 'RUNNING' | 'PAUSED' | 'DRAINING' | 'COMPLETED' | 'INTERRUPTED';
+export type AutoTradingExecutionMode = 'follow' | 'autonomous';
 export interface AutoTradingConfig {
   marketType: MarketType;
   initialCapital: number;
@@ -46,6 +53,8 @@ export interface AutoPosition {
   entryFee: number;
   realizedPnl: number;
   tp1Hit: boolean;
+  peakPrice?: number;
+  trailingActive?: boolean;
   lastReceivedAt: number;
   incomplete?: boolean;
   exitNotional: number;
@@ -180,10 +189,21 @@ export class AutoTradingEngine {
   private unhealthySince: number | undefined;
   private acceptConfirmationsAfter = 0;
   private notifications: AutoTradingNotification[] = [];
+  private readonly executionMode: AutoTradingExecutionMode;
   revision = 0;
 
-  constructor(market: MarketType) { this.state = idleAutoTradingSnapshot(market); }
+  constructor(market: MarketType, options?: { executionMode?: AutoTradingExecutionMode }) {
+    this.executionMode = options?.executionMode ?? 'follow';
+    this.state = idleAutoTradingSnapshot(market);
+  }
   snapshot(): AutoTradingSnapshot { return structuredClone(this.state); }
+  getPositionForSymbol(symbol: string): Readonly<AutoPosition> | undefined { return this.state.positions.find(p => p.symbol === symbol); }
+  hasPendingEntry(symbol: string): boolean { return this.state.orders.some(o => o.kind === 'ENTRY' && o.symbol === symbol); }
+  getActiveEntryCount(): number { return this.state.positions.length + this.state.orders.filter(o => o.kind === 'ENTRY').length; }
+  hasClosedTradeInHour(hourStartMs: number, symbol: string, side: 'LONG' | 'SHORT'): boolean {
+    const hourEndMs = hourStartMs + 3_600_000;
+    return this.state.trades.some(t => t.symbol === symbol && t.side === side && t.closedAt >= hourStartMs && t.closedAt < hourEndMs);
+  }
   setRules(rules: Record<string, AutoSymbolRules>) { this.rules = structuredClone(rules); }
   takeNotifications() { const result = this.notifications; this.notifications = []; return result; }
   setStreamHealthy(healthy: boolean, now: number, interruptedSince?: number) {
@@ -210,7 +230,7 @@ export class AutoTradingEngine {
       peakTimestamp: now, riskExtrema: [{ timestamp: now, value: config.initialCapital }] };
     this.seenPlans.clear(); this.lastTrades.clear(); this.notifications = [];
     this.acceptConfirmationsAfter = now;
-    this.record('START', now, '即時模擬評估開始，保守回撤確認 v1');
+    this.record('START', now, this.executionMode === 'autonomous' ? '即時模擬評估開始（純模型訊號驅動 v1）' : '即時模擬評估開始，保守回撤確認 v1');
   }
   pause(now: number) {
     if (this.state.status !== 'RUNNING') return;
@@ -249,12 +269,13 @@ export class AutoTradingEngine {
   tick(now: number) {
     if (!isAutoTradingActive(this.state.status)) return;
     if (!this.health && now - (this.unhealthySince ?? now) > 5_000) { this.interrupt(now, '成交串流異常超過五秒'); return; }
-    if (this.state.positions.some(p => now - p.lastReceivedAt > 5_000)) { this.interrupt(now, '持倉幣種超過五秒無新成交'); return; }
     for (const order of [...this.state.orders]) {
       if (order.kind === 'ENTRY' && now >= order.expiresAt) this.cancelOrder(order, now, '入場等待超過五秒');
     }
-    for (const p of this.state.positions) {
-      if (now - p.openedAt >= 900_000) this.requestExit(p, 'TIMEOUT', p.remainingQuantity, now, 0);
+    if (this.executionMode === 'follow') {
+      for (const p of this.state.positions) {
+        if (now - p.openedAt >= 900_000) this.requestExit(p, 'TIMEOUT', p.remainingQuantity, now, 0);
+      }
     }
     this.sampleEquity(now); this.finishIfDrained(now);
   }
@@ -272,20 +293,48 @@ export class AutoTradingEngine {
     for (const p of this.state.positions.filter(p => p.symbol === trade.symbol)) {
       p.currentPrice = trade.price; p.lastReceivedAt = now;
       const d = direction(p.side);
-      if (d * (trade.price - p.stopLoss) <= 0) this.requestExit(p, 'SL', p.remainingQuantity, now, trade.timestamp);
-      else if (reversal && reversal !== p.side) this.requestExit(p, 'REVERSAL', p.remainingQuantity, now, trade.timestamp);
-      else if (now - p.openedAt >= 900_000) this.requestExit(p, 'TIMEOUT', p.remainingQuantity, now, trade.timestamp);
-      else if (d * (trade.price - p.takeProfit2) >= 0) this.requestExit(p, 'TP2', p.remainingQuantity, now, trade.timestamp);
-      else if (!p.tp1Hit && d * (trade.price - p.takeProfit1) >= 0) this.requestExit(p, 'TP1', p.quantity / 2, now, trade.timestamp);
+      if (this.executionMode === 'autonomous') {
+        const prevPeak = p.peakPrice !== undefined && Number.isFinite(p.peakPrice) ? p.peakPrice : p.entryPrice;
+        p.peakPrice = d > 0 ? Math.max(prevPeak, trade.price) : Math.min(prevPeak, trade.price);
+        const peakGainPct = p.entryPrice > 0 ? (d * (p.peakPrice - p.entryPrice)) / p.entryPrice : 0;
+        if (peakGainPct >= FOUR_GROUP_D_TRAILING_ACTIVATE_PCT) {
+          const wasActive = Boolean(p.trailingActive);
+          p.trailingActive = true;
+          const breakevenFloor = p.entryPrice * (1 + d * FOUR_GROUP_D_BREAKEVEN_BUFFER_PCT);
+          const trailStop = p.peakPrice * (1 - d * FOUR_GROUP_D_TRAILING_PULLBACK_PCT);
+          const candidateSl = d > 0 ? Math.max(breakevenFloor, trailStop) : Math.min(breakevenFloor, trailStop);
+          const nextSl = d > 0 ? Math.max(p.stopLoss, candidateSl) : Math.min(p.stopLoss, candidateSl);
+          if (nextSl !== p.stopLoss) {
+            p.stopLoss = nextSl;
+          }
+          if (!wasActive) {
+            this.record('TRAILING_ACTIVATED', now, `獲利達 +2%，啟動移動止盈追蹤（目前停利價 ${p.stopLoss.toPrecision(6)}）`, p.symbol);
+          }
+        }
+        if (d * (trade.price - p.stopLoss) <= 0) {
+          this.requestExit(p, p.trailingActive ? 'TRAILING_TP' : 'SL', p.remainingQuantity, now, trade.timestamp);
+        }
+      } else if (d * (trade.price - p.stopLoss) <= 0) {
+        this.requestExit(p, 'SL', p.remainingQuantity, now, trade.timestamp);
+      } else {
+        if (reversal && reversal !== p.side) this.requestExit(p, 'REVERSAL', p.remainingQuantity, now, trade.timestamp);
+        else if (now - p.openedAt >= 900_000) this.requestExit(p, 'TIMEOUT', p.remainingQuantity, now, trade.timestamp);
+        else if (d * (trade.price - p.takeProfit2) >= 0) this.requestExit(p, 'TP2', p.remainingQuantity, now, trade.timestamp);
+        else if (!p.tp1Hit && d * (trade.price - p.takeProfit1) >= 0) this.requestExit(p, 'TP1', p.quantity / 2, now, trade.timestamp);
+      }
     }
     for (const order of [...this.state.orders].filter(o => o.symbol === trade.symbol)) {
       if (order.kind === 'ENTRY') {
         const plan = order.plan!;
         const d = direction(order.side);
-        const retracement = d * (plan.triggerPrice - trade.price) / plan.impulse;
-        if (reversal && reversal !== order.side) { this.cancelOrder(order, now, '反向急變，取消入場'); continue; }
-        if (d * (trade.price - plan.stopLoss) <= 0 || d * (trade.price - plan.takeProfit1) >= 0 || retracement < 0.15 - 1e-10) {
-          this.cancelOrder(order, now, '已越過保守入場或保護範圍，不追價'); continue;
+        if (this.executionMode === 'follow') {
+          const retracement = d * (plan.triggerPrice - trade.price) / plan.impulse;
+          if (reversal && reversal !== order.side) { this.cancelOrder(order, now, '反向急變，取消入場'); continue; }
+          if (d * (trade.price - plan.stopLoss) <= 0 || d * (trade.price - plan.takeProfit1) >= 0 || retracement < 0.15 - 1e-10) {
+            this.cancelOrder(order, now, '已越過保守入場或保護範圍，不追價'); continue;
+          }
+        } else if (d * (trade.price - plan.stopLoss) <= 0) {
+          this.cancelOrder(order, now, '等待進場期間已觸及保護止損，取消入場'); continue;
         }
         if (now >= order.eligibleAt && this.health && trade.timestamp > order.signalTimestamp) this.fillEntry(order, frame);
       } else if (now >= order.eligibleAt && trade.timestamp > order.signalTimestamp) {
@@ -336,20 +385,101 @@ export class AutoTradingEngine {
     if (this.state.fundingStatus === 'ERROR') return;
     this.state.fundingStatus = 'ERROR'; this.record('FUNDING_ERROR', now, '資金費尚未核對，淨績效成本未完整');
   }
+  private validSymbolRule(symbol: string): AutoSymbolRules | null {
+    const rule = this.rules[symbol];
+    if (!rule || !positive(rule.stepSize) || !positive(rule.maxQty) || !Number.isFinite(rule.minQty) || rule.minQty < 0
+      || rule.minQty > rule.maxQty || !Number.isFinite(rule.minNotional) || rule.minNotional < 0
+      || (rule.maxNotional !== undefined && (!positive(rule.maxNotional) || rule.maxNotional < rule.minNotional))) {
+      return null;
+    }
+    return rule;
+  }
+  private canQueueSymbolEntry(symbol: string, side: 'LONG' | 'SHORT'): string | null {
+    if (this.state.status !== 'RUNNING') return '目前停止新進場';
+    if (!this.health) return '成交串流異常';
+    if (side === 'SHORT' && this.state.marketType === 'spot') return '市場或方向不支援';
+    if (!this.validSymbolRule(symbol)) return '缺少有效交易規格';
+    if (this.hasPositionForSymbol(symbol) || this.hasPendingEntry(symbol)) return '同幣已有持倉或待成交';
+    if (this.getActiveEntryCount() >= this.state.config.maxPositions) return '同時持倉上限已滿';
+    return null;
+  }
+  private hasPositionForSymbol(symbol: string): boolean { return this.state.positions.some(p => p.symbol === symbol); }
+  observeAutonomousEntry(params: {
+    planId: string;
+    symbol: string;
+    side: 'LONG' | 'SHORT';
+    referencePrice: number;
+    stopLoss: number;
+    now: number;
+    tradeId?: number;
+    timestamp: number;
+  }): boolean {
+    if (this.executionMode !== 'autonomous') return false;
+    if (this.seenPlans.has(params.planId)) return false;
+    this.seenPlans.add(params.planId);
+    const reject = (why: string) => { this.record('SKIP', params.now, why, params.symbol); return false; };
+    const gateErr = this.canQueueSymbolEntry(params.symbol, params.side);
+    if (gateErr) return reject(gateErr);
+    const d = direction(params.side);
+    if (!positive(params.referencePrice) || !positive(params.stopLoss) || d * (params.referencePrice - params.stopLoss) <= 0) {
+      return reject('點位方向或數值無效');
+    }
+    const syntheticPlan: FollowPlan = {
+      id: params.planId,
+      alertId: params.planId,
+      marketType: this.state.marketType,
+      symbol: params.symbol,
+      side: params.side,
+      state: 'CONFIRMED',
+      referencePrice: params.referencePrice,
+      triggerPrice: params.referencePrice,
+      triggerTimestamp: params.now,
+      impulse: Math.abs(params.referencePrice - params.stopLoss),
+      observationPrice: params.referencePrice,
+      zoneLow: params.referencePrice,
+      zoneHigh: params.referencePrice,
+      stopLoss: params.stopLoss,
+      takeProfit1: 0,
+      takeProfit2: 0,
+      confirmedEntry: params.referencePrice,
+      confirmedAt: params.now,
+      createdAt: params.now,
+      expiresAt: params.now + 5_000,
+      currentPrice: params.referencePrice,
+      stale: false,
+    };
+    this.state.orders.push({
+      id: this.nextId(),
+      planId: params.planId,
+      symbol: params.symbol,
+      side: params.side,
+      kind: 'ENTRY',
+      reason: 'LGBM_AI_SIGNAL',
+      createdAt: params.now,
+      eligibleAt: params.now + this.state.config.latencyMs,
+      expiresAt: params.now + 5_000,
+      plan: syntheticPlan,
+      signalTradeId: params.tradeId,
+      signalTimestamp: params.timestamp,
+    });
+    this.record('ENTRY_QUEUED', params.now, 'LightGBM＋AI 訊號一致，等待延遲後新成交', params.symbol);
+    return true;
+  }
+  queueAutonomousExit(symbol: string, reason: 'LGBM_EXIT' | 'AI_EXIT', now: number, timestamp: number): boolean {
+    if (this.executionMode !== 'autonomous') return false;
+    const p = this.state.positions.find(pos => pos.symbol === symbol);
+    if (!p) return false;
+    this.requestExit(p, reason, p.remainingQuantity, now, timestamp);
+    return true;
+  }
   private observeConfirmation(plan: FollowPlan, now: number, tradeId: number | undefined, timestamp: number) {
     if (this.seenPlans.has(plan.id)) return;
     this.seenPlans.add(plan.id);
     const reject = (why: string) => this.record('SKIP', now, why, plan.symbol);
-    if (this.state.status !== 'RUNNING') { reject('目前停止新進場'); return; }
-    if (!this.health) { reject('成交串流異常'); return; }
-    if (plan.marketType !== this.state.marketType || (plan.side === 'SHORT' && plan.marketType === 'spot')) { reject('市場或方向不支援'); return; }
+    if (plan.marketType !== this.state.marketType) { reject('市場或方向不支援'); return; }
     if (plan.stale || plan.confirmedAt === undefined || plan.confirmedAt < this.acceptConfirmationsAfter || now - plan.confirmedAt > 5_000) { reject('過期或啟動／恢復前的訊號'); return; }
-    const rule = this.rules[plan.symbol];
-    if (!rule || !positive(rule.stepSize) || !positive(rule.maxQty) || !Number.isFinite(rule.minQty) || rule.minQty < 0
-      || rule.minQty > rule.maxQty || !Number.isFinite(rule.minNotional) || rule.minNotional < 0
-      || (rule.maxNotional !== undefined && (!positive(rule.maxNotional) || rule.maxNotional < rule.minNotional))) { reject('缺少有效交易規格'); return; }
-    if (this.state.positions.some(p => p.symbol === plan.symbol) || this.state.orders.some(o => o.kind === 'ENTRY' && o.symbol === plan.symbol)) { reject('同幣已有持倉或待成交'); return; }
-    if (this.state.positions.length + this.state.orders.filter(o => o.kind === 'ENTRY').length >= this.state.config.maxPositions) { reject('同時持倉上限已滿'); return; }
+    const gateErr = this.canQueueSymbolEntry(plan.symbol, plan.side);
+    if (gateErr) { reject(gateErr); return; }
     const d = direction(plan.side);
     if (![plan.confirmedEntry!, plan.stopLoss, plan.takeProfit1, plan.takeProfit2, plan.impulse].every(positive)
       || d * (plan.confirmedEntry! - plan.stopLoss) <= 0 || d * (plan.takeProfit1 - plan.confirmedEntry!) <= 0
@@ -366,34 +496,51 @@ export class AutoTradingEngine {
     const plan = order.plan!;
     const d = direction(order.side), slip = config.slippageBps / 10_000, fee = config.feeBps / 10_000;
     const price = frame.trade.price * (1 + d * slip);
-    const retracement = d * (plan.triggerPrice - price) / plan.impulse;
-    if (!positive(price) || d * (price - plan.stopLoss) <= 0 || d * (plan.takeProfit1 - price) <= 0 || retracement < 0.15 - 1e-10) {
-      this.cancelOrder(order, frame.receivedAt, '滑價後已離開有效入場範圍'); return;
+    let stopLoss = plan.stopLoss;
+    let takeProfit1 = plan.takeProfit1;
+    let takeProfit2 = plan.takeProfit2;
+    if (this.executionMode === 'follow') {
+      const retracement = d * (plan.triggerPrice - price) / plan.impulse;
+      if (!positive(price) || d * (price - plan.stopLoss) <= 0 || d * (plan.takeProfit1 - price) <= 0 || retracement < 0.15 - 1e-10) {
+        this.cancelOrder(order, frame.receivedAt, '滑價後已離開有效入場範圍'); return;
+      }
+    } else {
+      const slPct = positive(plan.confirmedEntry) ? Math.abs(plan.confirmedEntry! - plan.stopLoss) / plan.confirmedEntry! : FOUR_GROUP_D_STOP_LOSS_PCT;
+      stopLoss = price * (1 - d * slPct);
+      takeProfit1 = 0;
+      takeProfit2 = 0;
+      if (!positive(price) || !positive(stopLoss) || d * (price - stopLoss) <= 0) {
+        this.cancelOrder(order, frame.receivedAt, '滑價後無法計算有效止損價位'); return;
+      }
     }
     const equity = calculateAutoEquity(this.state);
-    const stopFill = plan.stopLoss * (1 - d * slip);
+    const stopFill = stopLoss * (1 - d * slip);
     const unitRisk = d * (price - stopFill) + (price + stopFill) * fee;
     const qty = floorAutoQuantity(Math.min(equity * config.riskPct / 100 / unitRisk,
       equity * config.maxNotionalPct / 100 / price, Math.max(0, this.state.cash) / (price * (1 + fee)),
       rule.maxQty, (rule.maxNotional ?? Infinity) / price), rule.stepSize);
-    if (!positive(qty) || qty < rule.minQty || qty * price < rule.minNotional || floorAutoQuantity(qty / 2, rule.stepSize) < rule.minQty
-      || floorAutoQuantity(qty / 2, rule.stepSize) * plan.takeProfit1 < rule.minNotional) {
-      this.cancelOrder(order, frame.receivedAt, '資金不足或不符合分批交易最低數量／金額'); return;
+    const partialOk = this.executionMode === 'autonomous'
+      || (floorAutoQuantity(qty / 2, rule.stepSize) >= rule.minQty && floorAutoQuantity(qty / 2, rule.stepSize) * takeProfit1 >= rule.minNotional);
+    if (!positive(qty) || qty < rule.minQty || qty * price < rule.minNotional || !partialOk) {
+      this.cancelOrder(order, frame.receivedAt, this.executionMode === 'autonomous' ? '資金不足或未達最低下單數量／金額' : '資金不足或不符合分批交易最低數量／金額'); return;
     }
     const entryFee = qty * price * fee;
     const p: AutoPosition = { id: `${this.state.id}-position-${this.nextId()}`, planId: plan.id, symbol: plan.symbol, side: plan.side,
-      entryPrice: price, quantity: qty, remainingQuantity: qty, stopLoss: plan.stopLoss, takeProfit1: plan.takeProfit1,
-      takeProfit2: plan.takeProfit2, openedAt: frame.receivedAt, currentPrice: frame.trade.price, entryFee,
-      realizedPnl: 0, tp1Hit: false, lastReceivedAt: frame.receivedAt, exitNotional: 0, exitFees: 0, funding: 0 };
+      entryPrice: price, quantity: qty, remainingQuantity: qty, stopLoss, takeProfit1,
+      takeProfit2, openedAt: frame.receivedAt, currentPrice: frame.trade.price, entryFee,
+      realizedPnl: 0, tp1Hit: false,
+      ...(this.executionMode === 'autonomous' ? { peakPrice: price, trailingActive: false } : {}),
+      lastReceivedAt: frame.receivedAt, exitNotional: 0, exitFees: 0, funding: 0 };
     this.state.cash -= qty * price + entryFee;
     this.state.positions.push(p); this.removeOrder(order);
-    this.addFill(p, 'ENTRY', qty, price, entryFee, 0, 'CONFIRMED', frame);
+    const entryReason = this.executionMode === 'autonomous' ? 'LGBM_AI_SIGNAL' : 'CONFIRMED';
+    this.addFill(p, 'ENTRY', qty, price, entryFee, 0, entryReason, frame);
     this.record('ENTRY', frame.receivedAt, `模擬${p.side === 'LONG' ? '做多' : '做空'} ${qty}，成交 ${price}，手續費 ${entryFee.toFixed(4)}`, p.symbol);
-    this.notify('auto-entry', frame.receivedAt, p.symbol, price, '保守條件已確認，已模擬成交；不是真實訂單', p.planId);
+    this.notify('auto-entry', frame.receivedAt, p.symbol, price, this.executionMode === 'autonomous' ? 'LightGBM＋AI 訊號已模擬成交；不是真實訂單' : '保守條件已確認，已模擬成交；不是真實訂單', p.planId);
     this.sampleEquity(frame.receivedAt, true);
   }
   private requestExit(p: AutoPosition, reason: string, quantity: number, now: number, timestamp: number) {
-    const priorities: Record<string, number> = { TP1: 1, TP2: 2, TIMEOUT: 3, MANUAL: 4, REVERSAL: 5, SL: 6 };
+    const priorities: Record<string, number> = { TP1: 1, TP2: 2, TIMEOUT: 3, LGBM_EXIT: 4, AI_EXIT: 4, MANUAL: 5, REVERSAL: 6, TRAILING_TP: 7, SL: 7 };
     const existing = this.state.orders.find(o => o.positionId === p.id);
     if (existing) {
       if ((priorities[reason] ?? 0) > (priorities[existing.reason] ?? 0)) {

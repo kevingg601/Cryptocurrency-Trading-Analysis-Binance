@@ -419,6 +419,7 @@ export default function ModelResearchCenter({
 
   const rolling = statusData?.rollingPipeline ?? null;
   const isChronosTraining = Boolean(rolling?.chronos2?.isTraining || rolling?.autoSchedule?.isTrainingChronos);
+  const chronosPaused = Boolean(rolling?.trainingPaused ?? rolling?.chronos2?.paused ?? true);
 
   return (
     <div className="mr-container" data-testid="model-research-center">
@@ -486,12 +487,20 @@ export default function ModelResearchCenter({
           <button
             type="button"
             className="mr-secondary-btn"
-            disabled={triggeringRetrain || isChronosTraining || panelState === 'LOADING'}
+            disabled={chronosPaused || triggeringRetrain || isChronosTraining || panelState === 'LOADING'}
             onClick={() => void handleTriggerChronosRetrain()}
-            title="立即於背景使用本機 GPU 重新訓練 Chronos-2 LoRA（預設每 6 小時自動執行）"
+            title={chronosPaused
+              ? (rolling?.pausedReason || 'Chronos-2 及其他非 LightGBM 模型訓練目前已暫停，僅執行 LightGBM 每小時獨立更新')
+              : '立即於背景使用本機 GPU 重新訓練 Chronos-2 LoRA（預設每 6 小時自動執行）'}
           >
-            <RefreshCw size={14} className={isChronosTraining ? 'spinning' : ''} />
-            <span>{isChronosTraining ? 'GPU 微調中...' : '重訓 Chronos-2 (GPU)'}</span>
+            <RefreshCw size={14} className={isChronosTraining && !chronosPaused ? 'spinning' : ''} />
+            <span>
+              {chronosPaused
+                ? '重訓 Chronos-2 (目前已暫停)'
+                : isChronosTraining
+                  ? 'GPU 微調中...'
+                  : '重訓 Chronos-2 (GPU)'}
+            </span>
           </button>
 
           <button
@@ -569,23 +578,27 @@ export default function ModelResearchCenter({
             )}
           </div>
           <div className="mr-meta-card">
-            <span>Chronos-2 LoRA（每 {rolling.chronos2?.retrainIntervalHours ?? 6} 小時 / 本機 GPU）</span>
+            <span>
+              Chronos-2 LoRA（{chronosPaused ? '訓練目前已暫停' : `每 ${rolling.chronos2?.retrainIntervalHours ?? 6} 小時 / 本機 GPU`}）
+            </span>
             <strong>
               {rolling.chronos2?.ready
                 ? `${rolling.chronos2.versionId} ・ ${formatUtcAndTaipei(rolling.chronos2.trainedAt)}`
-                : rolling.chronos2?.isTraining
-                  ? '首次本機 GPU 訓練進行中...'
-                  : `尚未就緒（${rolling.chronos2?.reason || '請點擊「重訓 Chronos-2 (GPU)」'}）`}
+                : chronosPaused
+                  ? '訓練已暫停（僅維持 LightGBM 每小時獨立更新）'
+                  : rolling.chronos2?.isTraining
+                    ? '首次本機 GPU 訓練進行中...'
+                    : `尚未就緒（${rolling.chronos2?.reason || '請點擊「重訓 Chronos-2 (GPU)」'}）`}
             </strong>
             <span className="mr-note">
               {rolling.chronos2?.valReturnMae != null ? `Val 4h MAE：${(rolling.chronos2.valReturnMae * 100).toFixed(3)}% ・ ` : ''}
-              下次 GPU 重訓：{rolling.chronos2?.nextRetrainAt ? formatUtcAndTaipei(rolling.chronos2.nextRetrainAt) : '--'}
+              {chronosPaused ? '已保留既有權重與研究歷史' : `下次 GPU 重訓：${rolling.chronos2?.nextRetrainAt ? formatUtcAndTaipei(rolling.chronos2.nextRetrainAt) : '--'}`}
             </span>
           </div>
           <div className="mr-meta-card">
-            <span>每小時自動更新排程 / 滑動視窗</span>
+            <span>{rolling.lgbmAutoSchedule ? 'LightGBM 獨立每小時排名排程' : '每小時自動更新排程'} / 滑動視窗</span>
             <strong>
-              {rolling.autoSchedule?.enabled ? '自動運作中' : '待機'} ・ {rolling.windowDays} 天滾動視窗
+              {(rolling.lgbmAutoSchedule?.enabled ?? rolling.autoSchedule?.enabled) ? '自動運作中' : '待機'} ・ {rolling.windowDays} 天滾動視窗
             </strong>
             <span className="mr-note">
               下次整點更新：{rolling.autoSchedule?.nextRunAt ? formatUtcAndTaipei(rolling.autoSchedule.nextRunAt) : '--'}
@@ -629,11 +642,17 @@ export default function ModelResearchCenter({
               <button
                 type="button"
                 className="mr-secondary-btn"
-                disabled={triggeringRetrain || isChronosTraining}
+                disabled={chronosPaused || triggeringRetrain || isChronosTraining}
                 onClick={() => void handleTriggerChronosRetrain()}
               >
-                <RefreshCw size={14} className={isChronosTraining ? 'spinning' : ''} />
-                <span>{isChronosTraining ? '正在背景執行本機 GPU 微調...' : '立即於本機 GPU 訓練 Chronos-2 LoRA'}</span>
+                <RefreshCw size={14} className={isChronosTraining && !chronosPaused ? 'spinning' : ''} />
+                <span>
+                  {chronosPaused
+                    ? 'Chronos-2 GPU 訓練（目前已暫停）'
+                    : isChronosTraining
+                      ? '正在背景執行本機 GPU 微調...'
+                      : '立即於本機 GPU 訓練 Chronos-2 LoRA'}
+                </span>
               </button>
             </div>
           )}

@@ -302,3 +302,51 @@ CREATE TABLE IF NOT EXISTS model_paper_leases (
   generation BIGINT,
   expires_at BIGINT
 );
+
+CREATE TABLE IF NOT EXISTS four_group_trading_batches (
+  id VARCHAR PRIMARY KEY,
+  market VARCHAR NOT NULL,
+  status VARCHAR NOT NULL,
+  revision INTEGER NOT NULL,
+  ollama_url VARCHAR NOT NULL,
+  model VARCHAR NOT NULL,
+  prompt_version VARCHAR NOT NULL,
+  rule_version VARCHAR NOT NULL,
+  lgbm_policy_version VARCHAR NOT NULL,
+  started_at BIGINT NOT NULL,
+  ended_at BIGINT,
+  updated_at BIGINT NOT NULL,
+  batch_json VARCHAR NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS four_group_decisions (
+  id VARCHAR PRIMARY KEY,
+  batch_id VARCHAR NOT NULL,
+  plan_id VARCHAR NOT NULL,
+  symbol VARCHAR NOT NULL,
+  side VARCHAR NOT NULL,
+  confirmed_at BIGINT NOT NULL,
+  lgbm_snapshot_id VARCHAR,
+  lgbm_allowed BOOLEAN NOT NULL,
+  lgbm_reason VARCHAR NOT NULL,
+  ai_snapshot_id VARCHAR,
+  ai_direction VARCHAR,
+  ai_allowed BOOLEAN NOT NULL,
+  ai_reason VARCHAR NOT NULL,
+  allowed_a BOOLEAN NOT NULL,
+  allowed_b BOOLEAN NOT NULL,
+  allowed_c BOOLEAN NOT NULL,
+  allowed_d BOOLEAN NOT NULL,
+  decision_json VARCHAR NOT NULL,
+  created_at BIGINT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS four_group_leases (
+  batch_id VARCHAR PRIMARY KEY,
+  owner_token VARCHAR NOT NULL,
+  generation VARCHAR NOT NULL,
+  lease_expires_at BIGINT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS four_group_batches_market_idx ON four_group_trading_batches(market, started_at DESC);
+CREATE INDEX IF NOT EXISTS four_group_decisions_batch_idx ON four_group_decisions(batch_id, confirmed_at ASC);

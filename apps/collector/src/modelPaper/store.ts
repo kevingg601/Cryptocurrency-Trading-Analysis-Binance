@@ -440,6 +440,22 @@ export class ModelPaperStore {
     return rows.map(mapDecision);
   }
 
+  async listDecisionMeta(
+    experimentId: string,
+    conn: DuckDBClient = this.client,
+  ): Promise<Array<{ id: string; decisionHour: number; status: DecisionStatus; createdAt: number }>> {
+    const rows = await conn.all(
+      'SELECT id, decision_hour, status, created_at FROM model_paper_decisions WHERE experiment_id = ? ORDER BY decision_hour DESC, created_at DESC;',
+      experimentId,
+    );
+    return rows.map((row: any) => ({
+      id: String(row.id),
+      decisionHour: Number(row.decision_hour),
+      status: row.status as DecisionStatus,
+      createdAt: Number(row.created_at),
+    }));
+  }
+
   async insertOrderIfAbsent(order: PaperOrder, conn: DuckDBClient = this.client): Promise<void> {
     await conn.run(
       `INSERT INTO model_paper_orders
@@ -528,6 +544,17 @@ export class ModelPaperStore {
       ? 'SELECT * FROM model_paper_orders WHERE experiment_id = ? AND account = ? ORDER BY created_at DESC;'
       : 'SELECT * FROM model_paper_orders WHERE experiment_id = ? ORDER BY created_at DESC;';
     const rows = account ? await conn.all(sql, experimentId, account) : await conn.all(sql, experimentId);
+    return rows.map(mapOrder);
+  }
+
+  async listExecutionFailedOrders(
+    experimentId: string,
+    conn: DuckDBClient = this.client,
+  ): Promise<PaperOrder[]> {
+    const rows = await conn.all(
+      "SELECT * FROM model_paper_orders WHERE experiment_id = ? AND status = 'CANCELLED' AND cancel_reason = 'EXECUTION_FAILED';",
+      experimentId,
+    );
     return rows.map(mapOrder);
   }
 

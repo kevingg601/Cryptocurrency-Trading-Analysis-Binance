@@ -24,6 +24,8 @@ import { collectorClient } from '../api/collectorClient';
 import EquityChart from './EquityChart';
 import ABEquityChart from './ABEquityChart';
 import './AutoTrading.css';
+import type { useFourGroupTrading } from '../hooks/useFourGroupTrading';
+import FourGroupAutoTrading from './FourGroupAutoTrading';
 
 export interface AutoTradingProps {
   snapshot: AutoTradingSnapshot;
@@ -614,11 +616,14 @@ function Records({
                         {price(position.remainingQuantity)}
                         <small>／{price(position.quantity)}</small>
                       </td>
-                      <td>{price(position.stopLoss)}</td>
                       <td>
-                        {price(position.takeProfit1)}
+                        {price(position.stopLoss)}
+                        {position.trailingActive && <span className="at-tag">移動止盈中</span>}
+                      </td>
+                      <td>
+                        {position.takeProfit1 > 0 ? price(position.takeProfit1) : '--'}
                         {position.tp1Hit && <span className="at-tag">已達 TP1</span>}
-                        <small>{price(position.takeProfit2)}</small>
+                        <small>{position.takeProfit2 > 0 ? price(position.takeProfit2) : '--'}</small>
                       </td>
                       <td className={tone(floating)}>{money(floating)}</td>
                       <td>{money(position.entryFee)}</td>
@@ -881,9 +886,15 @@ export default function AutoTrading({
   availableModels = [],
   isolationVerified,
   universeSymbols = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT'],
-}: AutoTradingProps) {
-  const [localMode, setLocalMode] = useState<'single' | 'ab'>('single');
+  fourGroup,
+}: Omit<AutoTradingProps, 'tradingMode' | 'onToggleTradingMode'> & {
+  tradingMode?: 'single' | 'ab' | 'four';
+  onToggleTradingMode?: (mode: 'single' | 'ab' | 'four') => void;
+  fourGroup?: ReturnType<typeof useFourGroupTrading>;
+}) {
+  const [localMode, setLocalMode] = useState<'single' | 'ab' | 'four'>('single');
   const currentMode = propTradingMode ?? localMode;
+  const isFourActive = Boolean(fourGroup?.isActive);
 
   // Single mode state
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -1102,8 +1113,8 @@ export default function AutoTrading({
           <button
             type="button"
             className={currentMode === 'single' ? 'active' : ''}
-            disabled={isABActive}
-            title={isABActive ? 'A/B 對照模式執行中，請先結束後再切換' : undefined}
+            disabled={isABActive || isFourActive}
+            title={isABActive || isFourActive ? '多組對照模式執行中，請先結束後再切換' : undefined}
             onClick={() => (onToggleTradingMode ? onToggleTradingMode('single') : setLocalMode('single'))}
           >
             單帳戶評估
@@ -1111,12 +1122,23 @@ export default function AutoTrading({
           <button
             type="button"
             className={currentMode === 'ab' ? 'active' : ''}
-            disabled={isSingleActive}
-            title={isSingleActive ? '單帳戶評估執行中，請先結束後再切換' : undefined}
+            disabled={isSingleActive || isFourActive}
+            title={isSingleActive || isFourActive ? '其他評估執行中，請先結束後再切換' : undefined}
             onClick={() => (onToggleTradingMode ? onToggleTradingMode('ab') : setLocalMode('ab'))}
           >
             A/B 對照模式 (AI 門禁篩選)
           </button>
+          {fourGroup && (
+            <button
+              type="button"
+              className={currentMode === 'four' ? 'active' : ''}
+              disabled={isSingleActive || isABActive}
+              title={isSingleActive || isABActive ? '其他評估執行中，請先結束後再切換' : undefined}
+              onClick={() => (onToggleTradingMode ? onToggleTradingMode('four') : setLocalMode('four'))}
+            >
+              四組策略比較 (A/B/C/D)
+            </button>
+          )}
         </div>
         {currentMode === 'ab' && (
           <span className="at-mode-badge">
@@ -1124,9 +1146,42 @@ export default function AutoTrading({
             雙帳戶成對評估 · AI 許可門禁
           </span>
         )}
+        {currentMode === 'four' && (
+          <span className="at-mode-badge">
+            <BrainCircuit size={14} />
+            四組平行評估 · LightGBM Top3 ＋ Ollama 門禁
+          </span>
+        )}
       </div>
 
-      {currentMode === 'single' ? (
+      {currentMode === 'four' && fourGroup ? (
+        <FourGroupAutoTrading
+          marketType={snapshot.config.marketType}
+          theme={theme}
+          fourGroup={fourGroup}
+          onSelectSymbol={onSelectSymbol}
+          renderSettings={(settingsProps) => (
+            <Settings
+              key={`${settingsProps.formId}:${JSON.stringify(settingsProps.config)}`}
+              formId={settingsProps.formId}
+              config={settingsProps.config}
+              locked={settingsProps.locked}
+              historical={settingsProps.historical}
+              ready={settingsProps.ready}
+              onStart={settingsProps.onStart}
+            />
+          )}
+          renderRecords={(groupSnap, keySuffix) => (
+            <Records
+              key={`${keySuffix}-${groupSnap.id}`}
+              snapshot={groupSnap}
+              onSelectSymbol={onSelectSymbol}
+              onExport={(scope) => downloadCsv([groupSnap], `${keySuffix}-${scope}.csv`, scope)}
+              inspectLocked={false}
+            />
+          )}
+        />
+      ) : currentMode === 'single' ? (
         /* SINGLE MODE VIEW */
         <>
           <header className="at-header">

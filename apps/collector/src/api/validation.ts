@@ -81,6 +81,66 @@ export function installValidation(app: FastifyInstance) {
         batch: { type: 'object' },
       },
     };
+    if (route.method === 'GET' && route.url === '/api/ollama/status') {
+      properties.url = { type: 'string', maxLength: 500 };
+    }
+    if (route.method === 'POST' && route.url === '/api/ollama/test') body = {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        url: { type: 'string', minLength: 1, maxLength: 500 },
+        model: { type: 'string', minLength: 1, maxLength: 120 },
+      },
+    };
+    if (route.method === 'POST' && route.url === '/api/ollama/analyze') body = {
+      type: 'object',
+      required: ['model', 'symbols'],
+      additionalProperties: false,
+      properties: {
+        url: { type: 'string', minLength: 1, maxLength: 500 },
+        model: { type: 'string', minLength: 1, maxLength: 120 },
+        symbols: { type: 'array', minItems: 1, maxItems: 10, uniqueItems: true, items: symbol },
+        market,
+        promptVersion: { type: 'string', minLength: 1, maxLength: 80 },
+        ruleVersion: { type: 'string', minLength: 1, maxLength: 80 },
+      },
+    };
+    if (route.method === 'POST' && route.url === '/api/research/lgbm/update') body = {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        force: { type: 'boolean' },
+      },
+    };
+    if (route.method === 'POST' && route.url === '/api/four-group/batches/start') body = {
+      type: 'object',
+      required: ['config', 'model'],
+      additionalProperties: false,
+      properties: {
+        config: {
+          type: 'object',
+          required: ['marketType', 'initialCapital', 'riskPct', 'maxNotionalPct', 'maxPositions', 'feeBps', 'slippageBps', 'latencyMs'],
+          properties: {
+            marketType: { type: 'string', enum: ['futures'] },
+            initialCapital: { type: 'number', minimum: 100 },
+            riskPct: { type: 'number', exclusiveMinimum: 0, maximum: 5 },
+            maxNotionalPct: { type: 'number', exclusiveMinimum: 0, maximum: 20 },
+            maxPositions: { type: 'integer', minimum: 1, maximum: 3 },
+            feeBps: { type: 'number', minimum: 0, maximum: 100 },
+            slippageBps: { type: 'number', minimum: 0, maximum: 100 },
+            latencyMs: { type: 'integer', minimum: 250, maximum: 4999 },
+          },
+        },
+        coinMode: { type: 'string', enum: ['auto-lgbm', 'manual'] },
+        selectedCoins: { type: 'array', maxItems: 10, items: symbol },
+        ollamaUrl: { type: 'string', minLength: 1, maxLength: 500 },
+        model: { type: 'string', minLength: 1, maxLength: 120 },
+        signalSettings: {
+          type: 'object',
+          additionalProperties: { type: 'number' },
+        },
+      },
+    };
     if (route.url === '/api/migrate/browser') body = { type: 'object', properties: {
       paper: { type: 'object', additionalProperties: false, properties: { spot: paper, futures: paper } },
       batches: { type: 'array', items: { type: 'object', required: ['id'], properties: {
@@ -141,6 +201,11 @@ export function installValidation(app: FastifyInstance) {
       ...(route.url === '/api/paper/:market' ? { params: { type: 'object', required: ['market'], properties: { market } } } : {}),
       ...(route.url === '/api/ai/snapshots/:id' || route.url === '/api/ab/batches/:id' || route.url === '/api/ab/batches/:id/export.csv'
         || route.url === '/api/ab/batches/:id/claim' || route.url === '/api/ab/batches/:id/lease'
+        || route.url === '/api/four-group/batches/:id' || route.url === '/api/four-group/batches/:id/export.csv'
+        || route.url === '/api/four-group/batches/:id/pause' || route.url === '/api/four-group/batches/:id/resume'
+        || route.url === '/api/four-group/batches/:id/drain' || route.url === '/api/four-group/batches/:id/close-all'
+        || route.url === '/api/four-group/batches/:id/ollama-refresh'
+        || route.url === '/api/four-group/batches/:id/claim' || route.url === '/api/four-group/batches/:id/lease'
         || route.url === '/api/research/jobs/:id'
         || route.url === '/api/model-paper/experiments/:id'
         || route.url === '/api/model-paper/experiments/:id/pause'

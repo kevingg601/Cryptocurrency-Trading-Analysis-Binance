@@ -7,6 +7,7 @@ import {
   evaluateComparability,
   fetchAutoFundingHistory,
   fetchAutoSymbolRules,
+  valuate,
   type AccountId,
   type AdapterRunSummary,
   type AutoFundingRecord,
@@ -229,6 +230,7 @@ export class ModelPaperService {
       forwardInference: this.forwardInference,
       getRules: () => this.getRules(),
       isLeaseOwned: (expId) => this.ownedExperimentIds.has(expId),
+      onStateChanged: () => this.executor.invalidateWatchCache(),
       clock: this.clock,
     });
 
@@ -629,6 +631,7 @@ export class ModelPaperService {
 
     if (createdId === expId) {
       this.ownedExperimentIds.add(expId);
+      this.executor.invalidateWatchCache();
       this.scheduler.start(expId, { runImmediate: true });
     }
 
@@ -799,6 +802,7 @@ export class ModelPaperService {
       this.ownedExperimentIds.delete(experimentId);
       await this.store.withTx((tx) => this.store.releaseLease(experimentId, this.ownerToken, tx));
     }
+    this.executor.invalidateWatchCache();
     if (shouldStartScheduler) {
       this.scheduler.start(experimentId, { runImmediate: false });
       if (shouldRunCurrentHour) {
@@ -823,14 +827,22 @@ export class ModelPaperService {
     const lastPrices = this.executor.getLastPrices();
     const out = [];
     for (const exp of exps) {
-      const detail = await this.buildExperimentDetail(exp, lastPrices);
+      const accounts = await this.store.getAccounts(exp.id);
+      const positions = await this.store.listPositions(exp.id, undefined, 'OPEN');
+      const gaps = await this.store.listGaps(exp.id);
+      const orders = await this.store.listExecutionFailedOrders(exp.id);
+      const equityA = valuate(accounts.A, positions.filter(p => p.account === 'A'), lastPrices).equity;
+      const equityB = valuate(accounts.B, positions.filter(p => p.account === 'B'), lastPrices).equity;
       out.push({
         experiment: exp,
-        equityA: detail.accounts.A.metrics.equity,
-        equityB: detail.accounts.B.metrics.equity,
-        returnPctA: detail.accounts.A.metrics.netReturnPct,
-        returnPctB: detail.accounts.B.metrics.netReturnPct,
-        comparable: detail.comparability.comparable,
+        equityA,
+        equityB,
+        returnPctA: exp.config.initialCash > 0 ? (equityA / exp.config.initialCash - 1) * 100 : 0,
+        returnPctB: exp.config.initialCash > 0 ? (equityB / exp.config.initialCash - 1) * 100 : 0,
+        comparable: evaluateComparability(
+          accounts.A, accounts.B, gaps,
+          orders.filter(o => o.account === 'A'), orders.filter(o => o.account === 'B'),
+        ).comparable,
       });
     }
     return out;

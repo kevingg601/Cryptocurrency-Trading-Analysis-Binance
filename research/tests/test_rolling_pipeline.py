@@ -397,3 +397,70 @@ def test_worker_rolling_prepare_and_commit_research_end_to_end(tmp_path: Path, m
     assert res["kronosModel"] == "chronos2"
     latest_ptr = json.loads((tmp_path / "model-research" / "latest-run.json").read_text(encoding="utf-8"))
     assert latest_ptr["runId"] == "run-rolling-shared-1"
+
+
+def test_standalone_lgbm_hourly_update_publishes_ranking_and_dedups(tmp_path: Path) -> None:
+    symbols = [f"C{i}USDT" for i in range(12)]
+    cutoff = 1_760_000_400_000 + 25 * ONE_DAY_MS
+    start = cutoff - 22 * ONE_DAY_MS
+
+    seed_dir = tmp_path / "model-research" / "datasets"
+    seed_dir.mkdir(parents=True)
+    _make_klines(symbols, start, 22 * 24).to_parquet(seed_dir / "klines_1h.parquet", index=False)
+    _make_funding(symbols, start - 8 * ONE_DAY_MS, cutoff).to_parquet(seed_dir / "funding_rates.parquet", index=False)
+    (seed_dir / "dataset_manifest.json").write_text(
+        json.dumps({"universe": {"symbols": symbols}}),
+        encoding="utf-8",
+    )
+
+    first = worker.handle_rolling_update_lgbm_rank(
+        {
+            "dataDir": str(tmp_path),
+            "targetCutoffTime": cutoff,
+            "windowDays": 14,
+            "valDays": 4,
+            "allowNetwork": False,
+        }
+    )
+    assert first["snapshotId"].startswith(f"lgbm-{cutoff}-")
+    assert first["trainAudit"]["retrained"] is True
+    assert first["trainAudit"]["dedupedSameCutoff"] is False
+    assert first["trainAudit"]["elapsedMs"] >= 0
+    assert (tmp_path / "model-live" / "models" / "lgbm" / "latest-ranking.json").is_file()
+    assert (tmp_path / "model-live" / "models" / "lgbm" / "rankings" / f"{cutoff}.json").is_file()
+
+    # Same cutoff second run deduplicates training cleanly without Chronos dependency
+    second = worker.handle_rolling_update_lgbm_rank(
+        {
+            "dataDir": str(tmp_path),
+            "targetCutoffTime": cutoff,
+            "windowDays": 14,
+            "valDays": 4,
+            "allowNetwork": False,
+            "skipTrainingIfSameCutoff": False,
+        }
+    )
+    assert second["trainAudit"]["dedupedSameCutoff"] is True
+    assert second["trainAudit"]["retrained"] is False
+    assert second["lightgbm"]["versionId"] == first["lightgbm"]["versionId"]
+
+
+def test_standalone_lgbm_rejects_future_and_stale_cutoffs_before_mutating_live_data(tmp_path: Path, monkeypatch) -> None:
+    cutoff = 1_760_000_400_000
+    paths = rolling_store.resolve_live_paths(tmp_path)
+    paths.datasets_dir.mkdir(parents=True)
+    paths.state_path.write_text(json.dumps({"lastCutoffTime": cutoff}), encoding="utf-8")
+    before = paths.state_path.read_bytes()
+
+    def forbidden_sync(**_kwargs):
+        pytest.fail("stale/future request must not synchronize or retrain")
+
+    monkeypatch.setattr(rolling_store, "sync_rolling_dataset", forbidden_sync)
+    monkeypatch.setattr(worker.time, "time", lambda: (cutoff + 1000) / 1000)
+    with pytest.raises(worker.DataNotReadyError, match="未來"):
+        worker.handle_rolling_update_lgbm_rank({"dataDir": str(tmp_path), "targetCutoffTime": cutoff + ONE_HOUR_MS})
+    with pytest.raises(worker.DataNotReadyError, match="舊 cutoff"):
+        worker.handle_rolling_update_lgbm_rank({"dataDir": str(tmp_path), "targetCutoffTime": cutoff - ONE_HOUR_MS})
+    assert paths.state_path.read_bytes() == before
+    assert not paths.lgbm_current_path.exists()
+    assert not (paths.lgbm_root / "latest-ranking.json").exists()

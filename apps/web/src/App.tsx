@@ -1,4 +1,5 @@
-import { lazy, Suspense, useState, useEffect, useMemo } from 'react';
+import { lazy, Suspense, useCallback, useState, useEffect, useMemo } from 'react';
+import type { MarketTradeFrame, StreamHealth, StreamStatus } from '@fadachi/core';
 import { fetchSupportedCoins, fetchTickers, fetchFundingRates, FALLBACK_COINS } from './services/binance';
 import type { TickerData, CoinMetadata, MarketType } from './services/binance';
 import { formatCryptoPrice } from './services/utils';
@@ -11,6 +12,7 @@ import CoinPicker from './components/CoinPicker';
 import { useMarketAlerts } from './hooks/useMarketAlerts';
 import { useRealtimeQuotes } from './hooks/useRealtimeQuotes';
 import { useAutoTrading } from './hooks/useAutoTrading';
+import { useFourGroupTrading } from './hooks/useFourGroupTrading';
 import QuoteStatus from './components/QuoteStatus';
 import { paperLimitFillPrice, validatePaperOrder } from './services/orderValidation';
 import { LayoutDashboard, Wallet, Clock, Sun, Moon, Database } from 'lucide-react';
@@ -81,8 +83,24 @@ export default function App() {
     return saved === 'light' ? 'light' : 'dark';
   });
 
+  const [autoViewMode, setAutoViewMode] = useState<'single' | 'ab' | 'four'>('single');
   const autoTrading = useAutoTrading(marketType);
-  const { registerNotifications, setSignalSettings } = autoTrading;
+  const fourGroup = useFourGroupTrading(marketType);
+  const { registerNotifications, setSignalSettings, processFrame: processAutoFrame, onTradeStatus: onAutoTradeStatus, setTradingMode: setLegacyAutoTradingMode } = autoTrading;
+  const { registerNotifications: registerFourNotifications, setSignalSettings: setFourSignalSettings } = fourGroup;
+  const handleToggleAutoViewMode = useCallback((mode: 'single' | 'ab' | 'four') => {
+    setAutoViewMode(mode);
+    if (mode === 'single' || mode === 'ab') {
+      setLegacyAutoTradingMode(mode);
+    }
+  }, [setLegacyAutoTradingMode]);
+  const handleAutoTradeFrame = useCallback((frame: MarketTradeFrame) => {
+    processAutoFrame(frame);
+  }, [processAutoFrame]);
+  const handleAutoTradeStatus = useCallback((status: StreamStatus, health?: StreamHealth) => {
+    onAutoTradeStatus(status, health);
+  }, [onAutoTradeStatus]);
+  const anyAutoMarketLocked = autoTrading.marketLocked;
   const {
     alerts: marketAlerts,
     unreadCount: marketAlertUnreadCount,
@@ -99,14 +117,19 @@ export default function App() {
     clearAlerts: clearMarketAlerts,
     dismissToast: dismissMarketAlert,
     publishExternalNotification,
-  } = useMarketAlerts(marketType, autoTrading.processFrame);
+  } = useMarketAlerts(marketType, handleAutoTradeFrame);
   useEffect(() => {
     registerNotifications(publishExternalNotification);
-    return () => registerNotifications(null);
-  }, [registerNotifications, publishExternalNotification]);
+    registerFourNotifications(publishExternalNotification);
+    return () => {
+      registerNotifications(null);
+      registerFourNotifications(null);
+    };
+  }, [registerNotifications, registerFourNotifications, publishExternalNotification]);
   useEffect(() => {
     setSignalSettings({ ...marketAlertSettings });
-  }, [setSignalSettings, marketAlertSettings]);
+    setFourSignalSettings({ ...marketAlertSettings });
+  }, [setSignalSettings, setFourSignalSettings, marketAlertSettings]);
   const selectedFollowPlan = followPlans.find(plan => plan.id === selectedFollowPlanId && plan.symbol === selectedSymbol && plan.marketType === marketType)
     ?? autoTrading.history.flatMap(batch => batch.plans).find(plan => plan.id === selectedFollowPlanId && plan.symbol === selectedSymbol && plan.marketType === marketType)
     ?? followPlans.find(plan => plan.symbol === selectedSymbol && plan.marketType === marketType);
@@ -161,8 +184,14 @@ export default function App() {
   }, [visibleFollowPlan, autoTrading.abSnapshot.decisions, autoTrading.abHistory, autoTrading.latestAnalyses]);
 
   // Merge and deduplicate subscription symbols
-  const subSymbolsKey = Array.from(new Set([...coins.map(coin => coin.symbol), ...autoTrading.universeSymbols, selectedSymbol, ...watchlist])).sort().join(',');
-  const liveQuotes = useRealtimeQuotes(marketType, subSymbolsKey, selectedSymbol, setTickers, processTickerBatch, processAggregateTrade, autoTrading.onTradeStatus);
+  const subSymbolsKey = Array.from(new Set([
+    ...coins.map(coin => coin.symbol),
+    ...autoTrading.universeSymbols,
+    ...fourGroup.lgbmState.universeSymbols,
+    selectedSymbol,
+    ...watchlist,
+  ])).sort().join(',');
+  const liveQuotes = useRealtimeQuotes(marketType, subSymbolsKey, selectedSymbol, setTickers, processTickerBatch, processAggregateTrade, handleAutoTradeStatus);
 
   // Apply theme class to document body
   useEffect(() => {
@@ -787,11 +816,11 @@ export default function App() {
                 followEvents={followEvents}
                 notificationPermission={notificationPermission}
                 settings={marketAlertSettings}
-                settingsLocked={autoTrading.marketLocked}
+                settingsLocked={anyAutoMarketLocked}
                 tickers={tickers}
                 monitoredCount={coins.length}
                 onEnableDesktopAlerts={enableDesktopAlerts}
-                onSettingsChange={settings => { if (!autoTrading.marketLocked) setMarketAlertSettings(settings); }}
+                onSettingsChange={settings => { if (!anyAutoMarketLocked) setMarketAlertSettings(settings); }}
                 onMarkAllRead={markMarketAlertsRead}
                 onClearAlerts={clearMarketAlerts}
                 onDismissToast={dismissMarketAlert}
@@ -850,21 +879,21 @@ export default function App() {
 
             <div className="segmented-control">
               <button
-                disabled={autoTrading.marketLocked && marketType !== 'spot'}
-                title={autoTrading.marketLocked ? '請先結束自動交易評估再切換市場' : undefined}
+                disabled={anyAutoMarketLocked && marketType !== 'spot'}
+                title={anyAutoMarketLocked ? '請先結束自動交易評估再切換市場' : undefined}
                 className={marketType === 'spot' ? 'active' : ''}
                 onClick={() => {
-                  if (!autoTrading.marketLocked && marketType !== 'spot') setMarketType('spot');
+                  if (!anyAutoMarketLocked && marketType !== 'spot') setMarketType('spot');
                 }}
               >
                 現貨
               </button>
               <button
-                disabled={autoTrading.marketLocked && marketType !== 'futures'}
-                title={autoTrading.marketLocked ? '請先結束自動交易評估再切換市場' : undefined}
+                disabled={anyAutoMarketLocked && marketType !== 'futures'}
+                title={anyAutoMarketLocked ? '請先結束自動交易評估再切換市場' : undefined}
                 className={marketType === 'futures' ? 'active' : ''}
                 onClick={() => {
-                  if (!autoTrading.marketLocked && marketType !== 'futures') setMarketType('futures');
+                  if (!anyAutoMarketLocked && marketType !== 'futures') setMarketType('futures');
                 }}
               >
                 合約
@@ -1038,7 +1067,7 @@ export default function App() {
               onSelectSymbol={(symbol, planId) => {
                 const plan = autoTrading.history.flatMap((batch) => batch.plans).find((item) => item.id === planId);
                 if (plan && plan.marketType !== marketType) {
-                  if (autoTrading.marketLocked) return;
+                  if (anyAutoMarketLocked) return;
                   setMarketType(plan.marketType);
                 }
                 setSelectedSymbol(symbol);
@@ -1054,12 +1083,13 @@ export default function App() {
               onResumeAB={autoTrading.resumeAB}
               onDrainAB={autoTrading.drainAB}
               onCloseAllAB={autoTrading.closeAllAB}
-              tradingMode={autoTrading.tradingMode}
-              onToggleTradingMode={autoTrading.setTradingMode}
+              tradingMode={autoViewMode}
+              onToggleTradingMode={handleToggleAutoViewMode}
               availableModels={autoTrading.availableModels}
               isolationVerified={autoTrading.isolationVerified}
               universeSymbols={autoTrading.universeSymbols}
               latestAnalyses={autoTrading.latestAnalyses}
+              fourGroup={fourGroup}
             />
           ) : viewMode === 'ai' ? (
             <AIAnalysisCenter
